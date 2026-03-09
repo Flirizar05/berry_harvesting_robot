@@ -24,6 +24,10 @@ find_package(orocos_kdl REQUIRED)
 # built and sourced before compiling this package.
 find_package(ompl REQUIRED)
 
+set(CUSTOM_OMPL_INCLUDE_SRC /home/francisco/workspace/ompl_ws/src/ompl/src)
+set(CUSTOM_OMPL_INCLUDE_INSTALL /home/francisco/workspace/ompl_ws/install/ompl/include)
+set(CUSTOM_OMPL_LIBRARY /home/francisco/workspace/ompl_ws/install/ompl/lib/libompl.so)
+
 add_executable(mode2_trajectory_node
   src/mode2_trajectory_node.cpp
 )
@@ -38,18 +42,19 @@ ament_target_dependencies(mode2_trajectory_node
   visualization_msgs
   kdl_parser
   orocos_kdl
-  ompl
 )
 
 # Keep these include directories for compatibility with the current
 # custom OMPL workspace layout used by this project.
 target_include_directories(mode2_trajectory_node PRIVATE
-  /home/francisco/workspace/ompl_ws/src/ompl/src
-  /home/francisco/workspace/ompl_ws/install/ompl/include
+  ${CUSTOM_OMPL_INCLUDE_SRC}
+  ${CUSTOM_OMPL_INCLUDE_INSTALL}
 )
 
+# Force linking against the custom OMPL library that contains
+# HyRRT and HybridStateSpace, instead of the system ROS OMPL.
 target_link_libraries(mode2_trajectory_node
-  ompl::ompl
+  ${CUSTOM_OMPL_LIBRARY}
   orocos-kdl
 )
 
