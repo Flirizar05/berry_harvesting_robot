@@ -1,0 +1,40 @@
+# ROS 2 build artifacts
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# C/C++
+*.o
+*.so
+*.a
+
+# Editors and IDEs
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Colcon / test artifacts
+coverage/
+.pytest_cache/
+
+# Temporary files
+*.swp
+*.swo
+*~
+
+# Generated documentation
+docs/build/
