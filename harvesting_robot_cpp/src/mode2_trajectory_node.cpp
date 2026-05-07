@@ -53,7 +53,8 @@ static std::string getDefaultUrdfPath()
 {
   const std::string package_share =
     ament_index_cpp::get_package_share_directory("harvesting_robot");
-  return package_share + "/urdf/elfin3.urdf";
+  //return package_share + "/urdf/elfin3.urdf";
+  return package_share + "/urdf/gen3.urdf";
 }
 
 bool flowSet(oc::HyRRT::Motion *motion)
@@ -255,7 +256,8 @@ public:
 private:
   void declareParameters()
   {
-    this->declare_parameter<std::string>("base_frame", "elfin_base");
+    //this->declare_parameter<std::string>("base_frame", "elfin_base");
+    this->declare_parameter<std::string>("base_frame", "base_link");
     this->declare_parameter<std::string>("target_topic", "/target_base");
     this->declare_parameter<std::string>("joint_state_topic", "/joint_states");
 
@@ -285,10 +287,12 @@ private:
     this->declare_parameter<double>("waypoint_dt", 0.02);
 
     this->declare_parameter<std::string>("urdf_path", getDefaultUrdfPath());
-    this->declare_parameter<std::string>("ee_link", "rg2ft_grasp_point");
+    //this->declare_parameter<std::string>("ee_link", "rg2ft_grasp_point");
+    this->declare_parameter<std::string>("ee_link", "end_effector_link");
     this->declare_parameter<std::vector<std::string>>(
       "joint_names",
-      {"elfin_joint1", "elfin_joint2", "elfin_joint3", "elfin_joint4", "elfin_joint5", "elfin_joint6"});
+      {"joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"});
+      //{"elfin_joint1", "elfin_joint2", "elfin_joint3", "elfin_joint4", "elfin_joint5", "elfin_joint6"});
 
     this->declare_parameter<bool>("clamp_to_workspace", false);
   }

@@ -249,8 +249,10 @@ class ControlNode(Node):
 
     def _set_default_configuration(self) -> None:
         package_share = get_package_share_directory("harvesting_robot")
-        self.default_urdf_path = os.path.join(package_share, "urdf", "elfin3.urdf")
+        #self.default_urdf_path = os.path.join(package_share, "urdf", "elfin3.urdf")
+        self.default_urdf_path = os.path.join(package_share, "urdf", "gen3.urdf")
 
+        '''
         self.default_joint_names = [
             "elfin_joint1",
             "elfin_joint2",
@@ -259,10 +261,23 @@ class ControlNode(Node):
             "elfin_joint5",
             "elfin_joint6",
         ]
-        self.default_ee_link = "rg2ft_grasp_point"
+        '''
+        self.default_joint_names = [
+            "joint_1",
+            "joint_2",
+            "joint_3",
+            "joint_4",
+            "joint_5",
+            "joint_6",
+        ]
+
+        #self.default_ee_link = "rg2ft_grasp_point"
+        self.default_ee_link = "end_effector_link"
 
         self.default_joint_state_topic = "/joint_states"
-        self.default_controller_topic = "/elfin_arm_controller/joint_trajectory"
+        #self.default_controller_topic = "/elfin_arm_controller/joint_trajectory"
+        self.default_controller_topic = "/joint_trajectory_controller/joint_trajectory"
+
 
         self.default_dt = 0.02
         self.default_command_horizon_sec = 0.05
@@ -272,10 +287,12 @@ class ControlNode(Node):
         self.default_damp_pos = 0.12
         self.default_damp_ori = 0.12
 
-        self.default_joint_weights = np.array([5.0, 1.5, 1.0, 3.0, 1.0, 6.0], dtype=float)
+        #self.default_joint_weights = np.array([5.0, 1.5, 1.0, 3.0, 1.0, 6.0], dtype=float)
+        self.default_joint_weights = np.array([1.0, 1.0, 1.0, 1.0, 3.0, 1.0], dtype=float)
         self.default_max_joint_step_rad = 0.02
 
-        self.default_base_frame = "elfin_base"
+        #self.default_base_frame = "elfin_base"
+        self.default_base_frame = "base_link"
         self.default_use_tf = True and TF_AVAILABLE
 
         self.default_waypoint_topic = "/trajectory/waypoint"
@@ -299,7 +316,8 @@ class ControlNode(Node):
         self.default_log_period_sec = 0.5
 
         self.local_alignment_axis = np.array([0.0, 0.0, 1.0], dtype=float)
-        self.desired_alignment_axis = np.array([0.0, -1.0, 0.0], dtype=float)
+        #self.desired_alignment_axis = np.array([0.0, -1.0, 0.0], dtype=float)
+        self.desired_alignment_axis = np.array([1.0, 0.0, 0.0], dtype=float)
 
     def _declare_parameters(self) -> None:
         self.declare_parameter("urdf_path", self.default_urdf_path)

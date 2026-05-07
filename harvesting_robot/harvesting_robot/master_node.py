@@ -31,7 +31,8 @@ class MasterNode(Node):
     def _declare_parameters(self) -> None:
         self.declare_parameter("loop_dt", 0.02)
 
-        self.declare_parameter("stop_distance_m", 0.25)
+        #self.declare_parameter("stop_distance_m", 0.25)
+        self.declare_parameter("stop_distance_m", 0.01)
         self.declare_parameter("stop_margin_m", 0.01)
         self.declare_parameter("dist_fresh_timeout_sec", 2.0)
 
@@ -40,12 +41,13 @@ class MasterNode(Node):
         self.declare_parameter("plan_timeout_sec", 6.0)
         self.declare_parameter("execute_timeout_sec", 180.0)
 
-        self.declare_parameter("do_home_on_start", True)
+        #self.declare_parameter("do_home_on_start", True)
+        self.declare_parameter("do_home_on_start", False)
         self.declare_parameter("home_timeout_sec", 20.0)
         self.declare_parameter("home_pos_tol_rad", 0.05)
         self.declare_parameter("home_settle_cycles", 10)
         self.declare_parameter("home_horizon_sec", 2.0)
-
+        '''
         self.declare_parameter(
             "home_joint_names",
             [
@@ -55,6 +57,18 @@ class MasterNode(Node):
                 "elfin_joint4",
                 "elfin_joint5",
                 "elfin_joint6",
+            ],
+        )
+        '''
+        self.declare_parameter(
+            "home_joint_names",
+            [
+                "joint_1",
+                "joint_2",
+                "joint_3",
+                "joint_4",
+                "joint_5",
+                "joint_6",
             ],
         )
         self.declare_parameter(
@@ -75,11 +89,14 @@ class MasterNode(Node):
         self.declare_parameter("ctrl_status", "/control/status")
 
         self.declare_parameter("tcp_target_dist_topic", "/trajectory/tcp_target_dist")
-        self.declare_parameter("controller_topic", "/elfin_arm_controller/joint_trajectory")
+        #self.declare_parameter("controller_topic", "/elfin_arm_controller/joint_trajectory")
+        self.declare_parameter("controller_topic", "/joint_trajectory_controller/joint_trajectory")
         self.declare_parameter("joint_state_topic", "/joint_states")
 
-        self.declare_parameter("enable_mode2", True)
-        self.declare_parameter("enable_gripper", True)
+        #self.declare_parameter("enable_mode2", True)
+        self.declare_parameter("enable_mode2", False)
+        #self.declare_parameter("enable_gripper", True)
+        self.declare_parameter("enable_gripper", False)
 
         self.declare_parameter("pf_cmd", "/potentialfields/cmd")
         self.declare_parameter("pf_status", "/potentialfields/status")
@@ -101,6 +118,8 @@ class MasterNode(Node):
         self.declare_parameter("cmd_execute_stream", "EXECUTE_STREAM")
         self.declare_parameter("cmd_grasp", "GRASP")
         self.declare_parameter("cmd_release", "RELEASE")
+
+        self.declare_parameter("mode1_use_pf_vision", True)
 
     def _load_parameters(self) -> None:
         self.loop_dt = float(self.get_parameter("loop_dt").value)
@@ -177,6 +196,8 @@ class MasterNode(Node):
         )
         self.cmd_grasp = str(self.get_parameter("cmd_grasp").value)
         self.cmd_release = str(self.get_parameter("cmd_release").value)
+
+        self.mode1_use_pf_vision = bool(self.get_parameter("mode1_use_pf_vision").value)
 
     def _create_publishers(self) -> None:
         self.pub_status = self.create_publisher(String, self.master_status_topic, 10)
@@ -265,6 +286,19 @@ class MasterNode(Node):
         trajectory_msg.points = [point]
         self.pub_home.publish(trajectory_msg)
 
+    def _start_mode1_vision_phase(self) -> None:
+        if self.mode1_use_pf_vision:
+            self._set_phase("MODE1_PF_VISION")
+            self.pf_result = None
+            self._publish_string_command(self.pub_pf_cmd, self.cmd_capture)
+            self.get_logger().info("MODE1 -> MODE1_PF_VISION: CAPTURE")
+            return
+
+        self._set_phase("VISION")
+        self.vision_result = None
+        self._publish_string_command(self.pub_vision_cmd, self.cmd_capture)
+        self.get_logger().info("MODE1 -> VISION: CAPTURE")
+
     def _start(self) -> None:
         self.busy = True
 
@@ -292,10 +326,7 @@ class MasterNode(Node):
             self._set_phase("HOME")
             self.get_logger().info("MASTER START -> HOME")
         else:
-            self._set_phase("VISION")
-            self.vision_result = None
-            self._publish_string_command(self.pub_vision_cmd, self.cmd_capture)
-            self.get_logger().info("MASTER START -> VISION: CAPTURE")
+            self._start_mode1_vision_phase()
 
     def _finish_ok(self, reason: str) -> None:
         self.busy = False
@@ -408,10 +439,7 @@ class MasterNode(Node):
                 self.home_settle_count = 0
 
             if self.home_settle_count >= self.home_settle_cycles:
-                self._set_phase("VISION")
-                self.vision_result = None
-                self._publish_string_command(self.pub_vision_cmd, self.cmd_capture)
-                self.get_logger().info("HOME reached -> VISION: CAPTURE")
+                self._start_mode1_vision_phase()
                 return
 
             if self._elapsed_phase_time() > self.home_timeout_sec:
@@ -494,9 +522,7 @@ class MasterNode(Node):
         if self.state == "EXECUTE":
             if self.ctrl_result == "DONE_OK":
                 self.ctrl_result = None
-                self._set_phase("VISION")
-                self.vision_result = None
-                self._publish_string_command(self.pub_vision_cmd, self.cmd_capture)
+                self._start_mode1_vision_phase()
                 return
 
             if self.ctrl_result == "DONE_FAIL":
@@ -505,6 +531,22 @@ class MasterNode(Node):
 
             if self._elapsed_phase_time() > self.execute_timeout_sec:
                 self._finish_fail("Execute timeout")
+            return
+
+        if self.state == "MODE1_PF_VISION":
+            if self.pf_result == "DONE_OK":
+                self.pf_result = None
+                self._set_phase("EYE")
+                self.eye_result = None
+                self._publish_string_command(self.pub_eye_cmd, self.cmd_compute)
+                return
+
+            if self.pf_result == "DONE_FAIL":
+                self._finish_fail("Potential fields capture failed (mode1)")
+                return
+
+            if self._elapsed_phase_time() > self.pf_timeout_sec:
+                self._finish_fail("Potential fields timeout (mode1)")
             return
 
         if self.state == "PF_VISION":

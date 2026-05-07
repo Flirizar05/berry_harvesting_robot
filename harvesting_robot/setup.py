@@ -13,9 +13,9 @@ setup(
             [f"resource/{package_name}"],
         ),
         (f"share/{package_name}", ["package.xml"]),
-        (f"share/{package_name}/models", glob("harvesting_robot/models/*")),
+        (f"share/{package_name}/models", glob("models/*")),
         (f"share/{package_name}/launch", glob("launch/*.launch.py")),
-        (f"share/{package_name}/urdf", glob("harvesting_robot/urdf/*")),
+        (f"share/{package_name}/urdf", glob("urdf/*")),
     ],
     install_requires=[
         "setuptools",

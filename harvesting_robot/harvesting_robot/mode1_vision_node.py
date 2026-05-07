@@ -82,6 +82,7 @@ class Mode1VisionNode(Node):
         self.is_busy = False
         self.search_timeout_sec = 2.0
         self.search_start_time = None
+        self.fail_reason = ""
 
         self.latest_color_image = None
         self.latest_depth_image = None
@@ -108,6 +109,7 @@ class Mode1VisionNode(Node):
         self.declare_parameter("status_topic", "/vision/status")
         self.declare_parameter("color_topic", "/camera/color/image_raw")
         self.declare_parameter("depth_topic", "/camera/aligned_depth/image_raw")
+        #self.declare_parameter("depth_topic", "/camera/depth/image_raw")
         self.declare_parameter("camera_info_topic", "/camera/color/camera_info")
 
         self.declare_parameter("output_point_topic", "/camera_sphere")
@@ -269,6 +271,7 @@ class Mode1VisionNode(Node):
 
         self.is_busy = True
         self.search_start_time = self.get_clock().now()
+        self.fail_reason = ""
         self.status_publisher.publish(String(data="BUSY"))
 
     def _elapsed_search_time(self) -> float:
@@ -279,6 +282,8 @@ class Mode1VisionNode(Node):
         return (now - self.search_start_time).nanoseconds * 1e-9
 
     def _set_idle(self, success: bool) -> None:
+        if not success and self.fail_reason:
+            self.get_logger().error(f"DONE_FAIL cause: {self.fail_reason}")
         self.status_publisher.publish(String(data="DONE_OK" if success else "DONE_FAIL"))
         self.is_busy = False
         self.status_publisher.publish(String(data="IDLE"))
@@ -327,7 +332,7 @@ class Mode1VisionNode(Node):
                 class_ids.append(class_id)
 
         if not boxes:
-            return [], [], []
+            return [], [], [], []
 
         kept_indexes = cv2.dnn.NMSBoxes(
             boxes,
@@ -337,7 +342,7 @@ class Mode1VisionNode(Node):
         )
 
         if len(kept_indexes) == 0:
-            return [], [], []
+            return [], boxes, confidences, class_ids
 
         normalized_indexes = []
         for index in kept_indexes:
@@ -357,6 +362,8 @@ class Mode1VisionNode(Node):
         annotated_image: np.ndarray,
     ):
         cluster_points = []
+        target_class_count = 0
+        valid_depth_count = 0
 
         for detection_index in kept_indexes:
             x, y, width_px, height_px = boxes[detection_index]
@@ -387,6 +394,8 @@ class Mode1VisionNode(Node):
             if class_id != 2 or confidence < self.confidence_threshold:
                 continue
 
+            target_class_count += 1
+
             if (
                 0 <= center_x_px < depth_image.shape[1]
                 and 0 <= center_y_px < depth_image.shape[0]
@@ -396,13 +405,14 @@ class Mode1VisionNode(Node):
                 depth_m = 0.0
 
             if depth_m > self.min_valid_depth_m:
+                valid_depth_count += 1
                 cluster_points.append([center_x_px, center_y_px, depth_m])
 
-        return cluster_points
+        return cluster_points, target_class_count, valid_depth_count
 
     def _select_best_cluster(self, cluster_points, annotated_image: np.ndarray):
         if len(cluster_points) == 0:
-            return None
+            return None, np.array([], dtype=int)
 
         points = np.array(cluster_points, dtype=float)
 
@@ -462,7 +472,7 @@ class Mode1VisionNode(Node):
                     "points_2d": group_points_2d,
                 }
 
-        return best_cluster
+        return best_cluster, labels
 
     def _publish_cluster_target(self, cluster_data, annotated_image: np.ndarray) -> bool:
         if cluster_data is None:
@@ -492,6 +502,10 @@ class Mode1VisionNode(Node):
         )
 
         if center_z_m <= self.min_valid_depth_m:
+            self.fail_reason = (
+                f"cluster center depth {center_z_m:.4f} m is not greater than "
+                f"min_valid_depth_m {self.min_valid_depth_m:.4f} m"
+            )
             return False
 
         target_x_m = (center_x_px - self.ppx) * center_z_m / self.fx
@@ -531,6 +545,13 @@ class Mode1VisionNode(Node):
             return
 
         if self.latest_depth_image is None or not self.has_camera_info:
+            if self.latest_depth_image is None and not self.has_camera_info:
+                self.fail_reason = "latest_depth_image is None and has_camera_info is False"
+            elif self.latest_depth_image is None:
+                self.fail_reason = "latest_depth_image is None"
+            else:
+                self.fail_reason = "has_camera_info is False"
+
             if self._elapsed_search_time() > self.search_timeout_sec:
                 self._set_idle(success=False)
             return
@@ -541,7 +562,12 @@ class Mode1VisionNode(Node):
 
         kept_indexes, boxes, confidences, class_ids = self._run_yolo_inference(color_image)
 
-        cluster_points = self._extract_cluster_points(
+        if len(boxes) == 0:
+            self.fail_reason = "no detections above confidence_threshold"
+        elif len(kept_indexes) == 0:
+            self.fail_reason = "no detections remained after NMS"
+
+        cluster_points, target_class_count, valid_depth_count = self._extract_cluster_points(
             kept_indexes,
             boxes,
             confidences,
@@ -550,7 +576,22 @@ class Mode1VisionNode(Node):
             annotated_image,
         )
 
-        best_cluster = self._select_best_cluster(cluster_points, annotated_image)
+        if len(cluster_points) == 0:
+            if len(kept_indexes) > 0 and target_class_count == 0:
+                self.fail_reason = "no kept detections matched target class_id 2"
+            elif target_class_count > 0 and valid_depth_count == 0:
+                self.fail_reason = "target class detections found but none had valid depth"
+            elif len(kept_indexes) > 0:
+                self.fail_reason = "no valid cluster points were generated"
+
+        best_cluster, labels = self._select_best_cluster(cluster_points, annotated_image)
+
+        if len(cluster_points) > 0 and best_cluster is None:
+            self.fail_reason = (
+                f"DBSCAN produced no valid clusters with eps={self.dbscan_eps} "
+                f"and min_samples={self.dbscan_min_samples}; labels={labels.tolist()}"
+            )
+
         published = self._publish_cluster_target(best_cluster, annotated_image)
 
         if self.show_preview:

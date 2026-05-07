@@ -43,7 +43,8 @@ class EyeInHandNode(Node):
     def _declare_parameters(self) -> None:
         self.declare_parameter("input_point_topic", "camera_sphere")
         self.declare_parameter("output_point_topic", "target_base")
-        self.declare_parameter("target_frame", "elfin_base")
+        #self.declare_parameter("target_frame", "elfin_base")
+        self.declare_parameter("target_frame", "base_link")
 
         self.declare_parameter("tf_timeout_sec", 0.8)
         self.declare_parameter("compute_timeout_sec", 3.0)
@@ -52,7 +53,8 @@ class EyeInHandNode(Node):
         # Offsets are applied after the point has been transformed into target_frame.
         self.declare_parameter("x_offset_m", 0.0)
         self.declare_parameter("y_offset_m", 0.0)
-        self.declare_parameter("z_offset_m", 0.11)
+        self.declare_parameter("z_offset_m", 0.0)
+        #self.declare_parameter("z_offset_m", 0.11)
 
     def _load_parameters(self) -> None:
         self.input_point_topic = str(self.get_parameter("input_point_topic").value)

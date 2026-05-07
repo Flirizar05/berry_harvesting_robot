@@ -20,12 +20,14 @@ def generate_launch_description():
     eye_launch_path = os.path.join(
         harvesting_robot_share,
         "launch",
-        "eyeinhand.launch.py",
+        "eyeinhandkinova.launch.py",
+        #"eyeinhand.launch.py",
     )
     default_urdf_path = os.path.join(
         harvesting_robot_share,
         "urdf",
-        "elfin3.urdf",
+        #"elfin3.urdf",
+        "gen3.urdf",
     )
 
     nodes = [
@@ -206,11 +208,13 @@ def generate_launch_description():
         # ---------------------------------------------------------------------
         # Frames and robot interfaces
         # ---------------------------------------------------------------------
-        DeclareLaunchArgument("base_frame", default_value="elfin_base"),
+        DeclareLaunchArgument("base_frame", default_value="base_link"),
+        #DeclareLaunchArgument("base_frame", default_value="elfin_base"),
         DeclareLaunchArgument("joint_state_topic", default_value="/joint_states"),
         DeclareLaunchArgument(
             "controller_topic",
-            default_value="/elfin_arm_controller/joint_trajectory",
+            default_value="/joint_trajectory_controller/joint_trajectory",
+            #default_value="/elfin_arm_controller/joint_trajectory",
         ),
 
         # ---------------------------------------------------------------------
@@ -253,7 +257,8 @@ def generate_launch_description():
         DeclareLaunchArgument("ctrl_cmd_topic", default_value="/control/cmd"),
         DeclareLaunchArgument("ctrl_status_topic", default_value="/control/status"),
 
-        DeclareLaunchArgument("projection_distance_m", default_value="0.15"),
+        #DeclareLaunchArgument("projection_distance_m", default_value="0.15"),
+        DeclareLaunchArgument("projection_distance_m", default_value="0.25"),
 
         # ---------------------------------------------------------------------
         # Control
@@ -262,7 +267,8 @@ def generate_launch_description():
             "urdf_path",
             default_value=default_urdf_path,
         ),
-        DeclareLaunchArgument("ee_link", default_value="rg2ft_grasp_point"),
+        DeclareLaunchArgument("ee_link", default_value="end_effector_link"),
+        #DeclareLaunchArgument("ee_link", default_value="rg2ft_grasp_point"),
 
         DeclareLaunchArgument("dt", default_value="0.02"),
         DeclareLaunchArgument("command_horizon_sec", default_value="0.05"),

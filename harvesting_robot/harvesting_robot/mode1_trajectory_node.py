@@ -292,9 +292,11 @@ class Mode1TrajectoryNode(Node):
 
     def _declare_parameters(self) -> None:
         package_share = get_package_share_directory("harvesting_robot")
-        default_urdf_path = os.path.join(package_share, "urdf", "elfin3.urdf")
+        #default_urdf_path = os.path.join(package_share, "urdf", "elfin3.urdf")
+        default_urdf_path = os.path.join(package_share, "urdf", "gen3.urdf")
 
-        self.declare_parameter("base_frame", "elfin_base")
+        #self.declare_parameter("base_frame", "elfin_base")
+        self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("target_topic", "/target_base")
         self.declare_parameter("radius_topic", "/sphere_radius")
         self.declare_parameter("joint_state_topic", "/joint_states")
@@ -306,6 +308,7 @@ class Mode1TrajectoryNode(Node):
         self.declare_parameter("tcp_target_dist_topic", "/trajectory/tcp_target_dist")
 
         self.declare_parameter("urdf_path", default_urdf_path)
+        '''
         self.declare_parameter(
             "joint_names",
             [
@@ -317,7 +320,21 @@ class Mode1TrajectoryNode(Node):
                 "elfin_joint6",
             ],
         )
-        self.declare_parameter("ee_link", "rg2ft_grasp_point")
+        '''
+        self.declare_parameter(
+            "joint_names",
+            [
+                "joint_1",
+                "joint_2",
+                "joint_3",
+                "joint_4",
+                "joint_5",
+                "joint_6",
+            ],
+        )
+        #self.declare_parameter("ee_link", "rg2ft_grasp_point")
+        self.declare_parameter("ee_link", "end_effector_link")
+
 
         self.declare_parameter("path_marker_topic", "/trajectory/path_marker")
         self.declare_parameter("sphere_marker_topic", "/trajectory/sphere_marker")
