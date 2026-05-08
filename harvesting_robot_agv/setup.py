@@ -29,6 +29,7 @@ setup(
     entry_points={
         "console_scripts": [
             "ble_agv_bridge_node = harvesting_robot_agv.ble_agv_bridge_node:main",
+            "agv_gui_node = harvesting_robot_agv.agv_gui_node:main",
         ],
     },
 )
