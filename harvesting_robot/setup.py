@@ -5,7 +5,7 @@ package_name = "harvesting_robot"
 
 setup(
     name=package_name,
-    version="1.0.1",
+    version="2.0.0",
     packages=find_packages(exclude=["test"]),
     data_files=[
         (
@@ -42,6 +42,7 @@ setup(
             "mode2_vision_node = harvesting_robot.mode2_vision_node:main",
             "gripper_node = harvesting_robot.gripper_node:main",
             "camera_node = harvesting_robot.camera_node:main",
+            "searching_mode_node = harvesting_robot.searching_mode_node:main",
         ],
     },
 )

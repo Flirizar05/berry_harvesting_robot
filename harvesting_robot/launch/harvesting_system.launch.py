@@ -125,6 +125,66 @@ def generate_launch_description():
         ),
 
         # ---------------------------------------------------------------------
+        # Searching mode node
+        # ---------------------------------------------------------------------
+        Node(
+            package="harvesting_robot",
+            executable="searching_mode_node",
+            name="searching_mode_node",
+            output="screen",
+            parameters=[{
+                "cmd_topic": pv("search_cmd_topic", str),
+                "status_topic": pv("search_status_topic", str),
+                "controller_topic": pv("controller_topic", str),
+                "pose_horizon_sec": pv("search_pose_horizon_sec", float),
+                "oscillation_horizon_sec": pv("search_oscillation_horizon_sec", float),
+                "oscillation_min_deg": pv("search_oscillation_min_deg", float),
+                "oscillation_max_deg": pv("search_oscillation_max_deg", float),
+                "oscillation_joint_index": pv("search_oscillation_joint_index", int),
+                "left_refine_min_deg": pv("search_left_refine_min_deg", float),
+                "left_refine_max_deg": pv("search_left_refine_max_deg", float),
+                "right_refine_min_deg": pv("search_right_refine_min_deg", float),
+                "right_refine_max_deg": pv("search_right_refine_max_deg", float),
+                "left_final_deg": pv("search_left_final_deg", float),
+                "right_final_deg": pv("search_right_final_deg", float),
+                "final_pose_horizon_sec": pv("search_final_pose_horizon_sec", float),
+                "color_topic": pv("camera_color_topic", str),
+                "depth_topic": pv("camera_depth_topic", str),
+                "camera_info_topic": pv("camera_color_info_topic", str),
+                "depth_scale_topic": pv("depth_scale_topic", str),
+                "depth_scale_fallback": pv("depth_scale_fallback", float),
+                "joint_state_topic": pv("joint_state_topic", str),
+                "detection_result_topic": pv("search_detection_result_topic", str),
+                "annotated_image_topic": pv("search_annotated_image_topic", str),
+                "show_preview": pv("search_show_preview", bool),
+                "preview_window": pv("search_preview_window", str),
+                "output_point_topic": pv("search_output_point_topic", str),
+                "target_base_topic": pv("target_topic", str),
+                "eye_cmd_topic": pv("eye_cmd_topic", str),
+                "trigger_eyeinhand_compute": pv("search_trigger_eyeinhand_compute", bool),
+                "eye_compute_delay_sec": pv("search_eye_compute_delay_sec", float),
+                "detection_period_sec": pv("search_detection_period_sec", float),
+                "berry_lost_timeout_sec": pv("search_berry_lost_timeout_sec", float),
+                "agv_cmd_topic": pv("agv_cmd_topic", str),
+                "agv_control_mode_topic": pv("agv_control_mode_topic", str),
+                "agv_stop_command": pv("search_agv_stop_command", str),
+                "agv_manual_command": pv("search_agv_manual_command", str),
+                "agv_automatic_command": pv("search_agv_automatic_command", str),
+                "agv_stop_period_sec": pv("search_agv_stop_period_sec", float),
+                "target_stop_distance_m": pv("search_target_stop_distance_m", float),
+                "final_target_timeout_sec": pv("search_final_target_timeout_sec", float),
+                "conf_thresh": pv("search_conf_thresh", float),
+                "nms_thresh": pv("search_nms_thresh", float),
+                "target_class_id": pv("search_target_class_id", int),
+                "min_valid_depth_m": pv("search_min_valid_depth_m", float),
+                "max_valid_depth_m": pv("search_max_valid_depth_m", float),
+                "negative_joint_side": pv("search_negative_joint_side", str),
+                "side_deadband_deg": pv("search_side_deadband_deg", float),
+                "joint_state_max_age_sec": pv("search_joint_state_max_age_sec", float),
+            }],
+        ),
+
+        # ---------------------------------------------------------------------
         # Mode 2 trajectory node
         # Publishes to the same waypoint topic consumed by control_node.
         # ---------------------------------------------------------------------
@@ -243,6 +303,52 @@ def generate_launch_description():
         DeclareLaunchArgument("vision_show_preview", default_value="true"),
 
         # ---------------------------------------------------------------------
+        # Searching mode
+        # ---------------------------------------------------------------------
+        DeclareLaunchArgument("search_cmd_topic", default_value="/searching_mode/cmd"),
+        DeclareLaunchArgument(
+            "search_status_topic",
+            default_value="/searching_mode/status",
+        ),
+        DeclareLaunchArgument("search_pose_horizon_sec", default_value="2.0"),
+        DeclareLaunchArgument("search_oscillation_horizon_sec", default_value="2.0"),
+        DeclareLaunchArgument("search_oscillation_min_deg", default_value="-45.0"),
+        DeclareLaunchArgument("search_oscillation_max_deg", default_value="45.0"),
+        DeclareLaunchArgument("search_oscillation_joint_index", default_value="0"),
+        DeclareLaunchArgument("search_left_refine_min_deg", default_value="-90.0"),
+        DeclareLaunchArgument("search_left_refine_max_deg", default_value="-45.0"),
+        DeclareLaunchArgument("search_right_refine_min_deg", default_value="45.0"),
+        DeclareLaunchArgument("search_right_refine_max_deg", default_value="90.0"),
+        DeclareLaunchArgument("search_left_final_deg", default_value="-90.0"),
+        DeclareLaunchArgument("search_right_final_deg", default_value="90.0"),
+        DeclareLaunchArgument("search_final_pose_horizon_sec", default_value="2.0"),
+        DeclareLaunchArgument("search_detection_result_topic", default_value="/searching_mode/detection"),
+        DeclareLaunchArgument("search_annotated_image_topic", default_value="/searching_mode/annotated_image"),
+        DeclareLaunchArgument("search_show_preview", default_value="true"),
+        DeclareLaunchArgument("search_preview_window", default_value="Searching Mode Detections"),
+        DeclareLaunchArgument("search_output_point_topic", default_value="/camera_sphere"),
+        DeclareLaunchArgument("search_trigger_eyeinhand_compute", default_value="true"),
+        DeclareLaunchArgument("search_eye_compute_delay_sec", default_value="0.05"),
+        DeclareLaunchArgument("search_detection_period_sec", default_value="0.2"),
+        DeclareLaunchArgument("search_berry_lost_timeout_sec", default_value="3.0"),
+        DeclareLaunchArgument("agv_cmd_topic", default_value="/agv/rpm_cmd"),
+        DeclareLaunchArgument("agv_control_mode_topic", default_value="/agv/control_mode"),
+        DeclareLaunchArgument("search_agv_stop_command", default_value="s"),
+        DeclareLaunchArgument("search_agv_manual_command", default_value="manual"),
+        DeclareLaunchArgument("search_agv_automatic_command", default_value="automatic"),
+        DeclareLaunchArgument("search_agv_stop_period_sec", default_value="0.05"),
+        DeclareLaunchArgument("search_target_stop_distance_m", default_value="1.0"),
+        DeclareLaunchArgument("search_final_target_timeout_sec", default_value="3.0"),
+        DeclareLaunchArgument("search_conf_thresh", default_value="0.6"),
+        DeclareLaunchArgument("search_nms_thresh", default_value="0.4"),
+        DeclareLaunchArgument("search_target_class_id", default_value="2"),
+        DeclareLaunchArgument("search_min_valid_depth_m", default_value="0.10"),
+        DeclareLaunchArgument("search_max_valid_depth_m", default_value="2.00"),
+        DeclareLaunchArgument("search_negative_joint_side", default_value="right"),
+        DeclareLaunchArgument("search_side_deadband_deg", default_value="2.0"),
+        DeclareLaunchArgument("search_joint_state_max_age_sec", default_value="0.5"),
+
+        # ---------------------------------------------------------------------
         # Mode 1 topics
         # ---------------------------------------------------------------------
         DeclareLaunchArgument("target_topic", default_value="/target_base"),
@@ -256,6 +362,7 @@ def generate_launch_description():
 
         DeclareLaunchArgument("ctrl_cmd_topic", default_value="/control/cmd"),
         DeclareLaunchArgument("ctrl_status_topic", default_value="/control/status"),
+        DeclareLaunchArgument("eye_cmd_topic", default_value="/eyeinhand/cmd"),
 
         #DeclareLaunchArgument("projection_distance_m", default_value="0.15"),
         DeclareLaunchArgument("projection_distance_m", default_value="0.25"),

@@ -18,6 +18,8 @@ from std_msgs.msg import String
 COMMAND_TOPIC = "/agv/rpm_cmd"
 CONTROL_MODE_TOPIC = "/agv/control_mode"
 CONTROL_STATUS_TOPIC = "/agv/position_control_status"
+SEARCHING_MODE_CMD_TOPIC = "/searching_mode/cmd"
+SEARCHING_MODE_STATUS_TOPIC = "/searching_mode/status"
 RADAR_IMAGE_TOPIC = "/agv/lidar_radar_image"
 CONTROL_MODE_MANUAL = "manual"
 CONTROL_MODE_AUTOMATIC = "automatic"
@@ -56,8 +58,11 @@ HTML_PAGE = """<!doctype html>
       --automatic-active: #0d47a1;
       --stop: #c62828;
       --stop-active: #8e0000;
+      --cobot: #6a1b9a;
+      --cobot-active: #4a148c;
       --indicator-off: #9e9e9e;
       --indicator-on: #2e7d32;
+      --indicator-refining: #f9a825;
     }
 
     * {
@@ -90,7 +95,8 @@ HTML_PAGE = """<!doctype html>
     }
 
     .mode-button,
-    .stop-button {
+    .stop-button,
+    .cobot-button {
       width: 100%;
       min-height: 48px;
       border: 2px solid var(--tk-dark-border);
@@ -119,7 +125,7 @@ HTML_PAGE = """<!doctype html>
 
     .status-row {
       display: grid;
-      grid-template-columns: 18px 1fr 18px 1fr;
+      grid-template-columns: 18px minmax(0, 1fr) 18px minmax(0, 1fr) 18px minmax(0, 1fr);
       column-gap: 6px;
       align-items: center;
       margin-top: 12px;
@@ -139,6 +145,10 @@ HTML_PAGE = """<!doctype html>
 
     .indicator.on {
       background: var(--indicator-on);
+    }
+
+    .indicator.refining {
+      background: var(--indicator-refining);
     }
 
     .notebook {
@@ -225,6 +235,23 @@ HTML_PAGE = """<!doctype html>
       background: var(--stop-active);
     }
 
+    .cobot-button {
+      margin-top: 8px;
+      background: var(--cobot);
+    }
+
+    .cobot-button:active {
+      background: var(--cobot-active);
+    }
+
+    .cobot-button.running {
+      background: var(--stop);
+    }
+
+    .cobot-button.running:active {
+      background: var(--stop-active);
+    }
+
     .radar-section {
       margin-top: 12px;
     }
@@ -291,6 +318,8 @@ HTML_PAGE = """<!doctype html>
       <span class="status-label">Orientation</span>
       <span id="positionIndicator" class="indicator"></span>
       <span class="status-label">Position</span>
+      <span id="harvestingIndicator" class="indicator"></span>
+      <span class="status-label">Harvesting</span>
     </section>
 
     <section class="notebook">
@@ -343,6 +372,7 @@ HTML_PAGE = """<!doctype html>
     </div>
 
     <button id="stopButton" class="stop-button" type="button">STOP</button>
+    <button id="cobotButton" class="cobot-button" type="button">Cobot</button>
 
     <section class="radar-section" aria-label="LiDAR radar">
       <div class="radar-header">LiDAR Radar</div>
@@ -370,8 +400,10 @@ HTML_PAGE = """<!doctype html>
     const elements = {
       modeButton: document.getElementById("modeButton"),
       stopButton: document.getElementById("stopButton"),
+      cobotButton: document.getElementById("cobotButton"),
       orientationIndicator: document.getElementById("orientationIndicator"),
       positionIndicator: document.getElementById("positionIndicator"),
+      harvestingIndicator: document.getElementById("harvestingIndicator"),
       speedTurnTab: document.getElementById("speedTurnTab"),
       independentTab: document.getElementById("independentTab"),
       speedTurnPanel: document.getElementById("speedTurnPanel"),
@@ -448,7 +480,20 @@ HTML_PAGE = """<!doctype html>
         "on",
         Boolean(serverState.position_control_active)
       );
+      elements.harvestingIndicator.classList.toggle(
+        "on",
+        Boolean(serverState.harvesting_active)
+      );
+      elements.harvestingIndicator.classList.toggle(
+        "refining",
+        Boolean(serverState.harvesting_refining_active)
+      );
       elements.commandLabel.textContent = serverState.command_label;
+      elements.cobotButton.textContent = serverState.cobot_label;
+      elements.cobotButton.classList.toggle(
+        "running",
+        Boolean(serverState.searching_mode_active)
+      );
     }
 
     function payload(action) {
@@ -555,6 +600,10 @@ HTML_PAGE = """<!doctype html>
       () => sendControl("toggle_mode")
     );
     elements.stopButton.addEventListener("click", stopAgv);
+    elements.cobotButton.addEventListener(
+      "click",
+      () => sendControl("cobot")
+    );
     elements.speedTurnTab.addEventListener(
       "click",
       () => selectTab(SELECTED_TAB_SPEED_TURN)
@@ -602,6 +651,8 @@ class AgvWebControlNode(Node):
         self.left_wheel = 0
         self.position_control_active = False
         self.orientation_control_active = False
+        self.harvesting_active = False
+        self.harvesting_refining_active = False
         self.automatic_right_rpm = 0
         self.automatic_left_rpm = 0
         self.latest_radar_image: bytes | None = None
@@ -609,6 +660,7 @@ class AgvWebControlNode(Node):
         self.last_browser_command_time: float | None = None
         self.safety_stop_active = False
         self.free_stop_active = False
+        self.searching_mode_active = False
         self.is_shutting_down = False
         self.lock = threading.RLock()
 
@@ -628,6 +680,12 @@ class AgvWebControlNode(Node):
             f"Publishing control mode to {self.control_mode_topic}"
         )
         self.get_logger().info(
+            f"Publishing searching mode commands to {self.searching_mode_cmd_topic}"
+        )
+        self.get_logger().info(
+            f"Subscribing to searching mode status on {self.searching_mode_status_topic}"
+        )
+        self.get_logger().info(
             f"Subscribing to control status on {self.control_status_topic}"
         )
         self.get_logger().info(
@@ -642,6 +700,11 @@ class AgvWebControlNode(Node):
         self.declare_parameter("command_topic", COMMAND_TOPIC)
         self.declare_parameter("control_mode_topic", CONTROL_MODE_TOPIC)
         self.declare_parameter("control_status_topic", CONTROL_STATUS_TOPIC)
+        self.declare_parameter("searching_mode_cmd_topic", SEARCHING_MODE_CMD_TOPIC)
+        self.declare_parameter(
+            "searching_mode_status_topic",
+            SEARCHING_MODE_STATUS_TOPIC,
+        )
         self.declare_parameter("radar_image_topic", RADAR_IMAGE_TOPIC)
         self.declare_parameter("invert_turn_direction", INVERT_TURN_DIRECTION)
         self.declare_parameter("web_host", WEB_HOST)
@@ -665,6 +728,18 @@ class AgvWebControlNode(Node):
         ).strip()
         if not self.control_status_topic:
             self.control_status_topic = CONTROL_STATUS_TOPIC
+
+        self.searching_mode_cmd_topic = str(
+            self.get_parameter("searching_mode_cmd_topic").value
+        ).strip()
+        if not self.searching_mode_cmd_topic:
+            self.searching_mode_cmd_topic = SEARCHING_MODE_CMD_TOPIC
+
+        self.searching_mode_status_topic = str(
+            self.get_parameter("searching_mode_status_topic").value
+        ).strip()
+        if not self.searching_mode_status_topic:
+            self.searching_mode_status_topic = SEARCHING_MODE_STATUS_TOPIC
 
         self.radar_image_topic = str(
             self.get_parameter("radar_image_topic").value
@@ -746,10 +821,21 @@ class AgvWebControlNode(Node):
             self.control_mode_topic,
             10,
         )
+        self.pub_searching_mode_cmd = self.create_publisher(
+            String,
+            self.searching_mode_cmd_topic,
+            10,
+        )
         self.control_status_sub = self.create_subscription(
             String,
             self.control_status_topic,
             self._on_control_status_received,
+            10,
+        )
+        self.searching_mode_status_sub = self.create_subscription(
+            String,
+            self.searching_mode_status_topic,
+            self._on_searching_mode_status_received,
             10,
         )
         self.radar_image_sub = self.create_subscription(
@@ -952,6 +1038,11 @@ class AgvWebControlNode(Node):
                 self.safety_stop_active = False
                 return self._get_state_locked()
 
+            if action == "cobot":
+                self._toggle_searching_mode_locked()
+                self.safety_stop_active = False
+                return self._get_state_locked()
+
             if action == "update":
                 self._update_controls_from_payload_locked(payload)
                 self.safety_stop_active = False
@@ -1104,9 +1195,13 @@ class AgvWebControlNode(Node):
             "left_wheel": self.left_wheel,
             "orientation_control_active": self.orientation_control_active,
             "position_control_active": self.position_control_active,
+            "harvesting_active": self.harvesting_active,
+            "harvesting_refining_active": self.harvesting_refining_active,
             "automatic_right_rpm": self.automatic_right_rpm,
             "automatic_left_rpm": self.automatic_left_rpm,
             "command_label": self._get_command_label_locked(),
+            "searching_mode_active": self.searching_mode_active,
+            "cobot_label": self._get_cobot_label_locked(),
         }
 
     def _publish_wheel_command_locked(self, right: int, left: int) -> None:
@@ -1123,6 +1218,27 @@ class AgvWebControlNode(Node):
         msg = String()
         msg.data = self.control_mode
         self.pub_control_mode.publish(msg)
+
+    def _publish_searching_mode_command_locked(self, command: str) -> None:
+        msg = String()
+        msg.data = command
+        self.pub_searching_mode_cmd.publish(msg)
+        self.get_logger().info(
+            f"Cobot button -> {self.searching_mode_cmd_topic} {command}"
+        )
+
+    def _toggle_searching_mode_locked(self) -> None:
+        command = "STOP" if self.searching_mode_active else "START"
+        self._publish_searching_mode_command_locked(command)
+        self.searching_mode_active = command == "START"
+        self.harvesting_active = False
+        self.harvesting_refining_active = False
+
+    def _get_cobot_label_locked(self) -> str:
+        if self.searching_mode_active:
+            return "Stop Cobot"
+
+        return "Cobot"
 
     def _on_publish_timer(self) -> None:
         if self.is_shutting_down:
@@ -1209,6 +1325,32 @@ class AgvWebControlNode(Node):
             self.position_control_active = position_control_active
             self.automatic_right_rpm = automatic_right_rpm
             self.automatic_left_rpm = automatic_left_rpm
+
+    def _on_searching_mode_status_received(self, msg: String) -> None:
+        status = msg.data.strip().upper()
+        if status == "BUSY":
+            searching_mode_active = True
+            harvesting_active = False
+            harvesting_refining_active = False
+        elif status == "REFINING":
+            searching_mode_active = True
+            harvesting_active = False
+            harvesting_refining_active = True
+        elif status == "HARVESTING":
+            searching_mode_active = True
+            harvesting_active = True
+            harvesting_refining_active = False
+        elif status in ("IDLE", "DONE_OK", "DONE_FAIL"):
+            searching_mode_active = False
+            harvesting_active = False
+            harvesting_refining_active = False
+        else:
+            return
+
+        with self.lock:
+            self.searching_mode_active = searching_mode_active
+            self.harvesting_active = harvesting_active
+            self.harvesting_refining_active = harvesting_refining_active
 
     def _clear_automatic_status_locked(self) -> None:
         self.position_control_active = False

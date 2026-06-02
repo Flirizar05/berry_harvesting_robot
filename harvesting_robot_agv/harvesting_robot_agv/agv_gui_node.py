@@ -12,6 +12,8 @@ from std_msgs.msg import String
 COMMAND_TOPIC = "/agv/rpm_cmd"
 CONTROL_MODE_TOPIC = "/agv/control_mode"
 CONTROL_STATUS_TOPIC = "/agv/position_control_status"
+SEARCHING_MODE_CMD_TOPIC = "/searching_mode/cmd"
+SEARCHING_MODE_STATUS_TOPIC = "/searching_mode/status"
 CONTROL_MODE_MANUAL = "manual"
 CONTROL_MODE_AUTOMATIC = "automatic"
 FREE_MODE_COMMAND = "s"
@@ -22,6 +24,7 @@ PUBLISH_PERIOD_MS = 100
 INVERT_TURN_DIRECTION = False
 INDICATOR_ON_COLOR = "#2e7d32"
 INDICATOR_OFF_COLOR = "#9e9e9e"
+INDICATOR_REFINING_COLOR = "#f9a825"
 
 
 class AgvGuiNode(Node):
@@ -33,9 +36,12 @@ class AgvGuiNode(Node):
         self.control_mode = CONTROL_MODE_MANUAL
         self.position_control_active = False
         self.orientation_control_active = False
+        self.harvesting_active = False
+        self.harvesting_refining_active = False
         self.automatic_right_rpm = 0
         self.automatic_left_rpm = 0
         self.free_stop_active = False
+        self.searching_mode_active = False
         self._declare_parameters()
         self._load_parameters()
         self._create_ros_interfaces()
@@ -53,6 +59,12 @@ class AgvGuiNode(Node):
             f"Publishing control mode to {self.control_mode_topic}"
         )
         self.get_logger().info(
+            f"Publishing searching mode commands to {self.searching_mode_cmd_topic}"
+        )
+        self.get_logger().info(
+            f"Subscribing to searching mode status on {self.searching_mode_status_topic}"
+        )
+        self.get_logger().info(
             f"Subscribing to control status on {self.control_status_topic}"
         )
 
@@ -60,6 +72,11 @@ class AgvGuiNode(Node):
         self.declare_parameter("command_topic", COMMAND_TOPIC)
         self.declare_parameter("control_mode_topic", CONTROL_MODE_TOPIC)
         self.declare_parameter("control_status_topic", CONTROL_STATUS_TOPIC)
+        self.declare_parameter("searching_mode_cmd_topic", SEARCHING_MODE_CMD_TOPIC)
+        self.declare_parameter(
+            "searching_mode_status_topic",
+            SEARCHING_MODE_STATUS_TOPIC,
+        )
         self.declare_parameter("invert_turn_direction", INVERT_TURN_DIRECTION)
 
     def _load_parameters(self) -> None:
@@ -79,6 +96,18 @@ class AgvGuiNode(Node):
         if not self.control_status_topic:
             self.control_status_topic = CONTROL_STATUS_TOPIC
 
+        self.searching_mode_cmd_topic = str(
+            self.get_parameter("searching_mode_cmd_topic").value
+        ).strip()
+        if not self.searching_mode_cmd_topic:
+            self.searching_mode_cmd_topic = SEARCHING_MODE_CMD_TOPIC
+
+        self.searching_mode_status_topic = str(
+            self.get_parameter("searching_mode_status_topic").value
+        ).strip()
+        if not self.searching_mode_status_topic:
+            self.searching_mode_status_topic = SEARCHING_MODE_STATUS_TOPIC
+
         self.invert_turn_direction = bool(
             self.get_parameter("invert_turn_direction").value
         )
@@ -90,10 +119,21 @@ class AgvGuiNode(Node):
             self.control_mode_topic,
             10,
         )
+        self.pub_searching_mode_cmd = self.create_publisher(
+            String,
+            self.searching_mode_cmd_topic,
+            10,
+        )
         self.control_status_sub = self.create_subscription(
             String,
             self.control_status_topic,
             self._on_control_status_received,
+            10,
+        )
+        self.searching_mode_status_sub = self.create_subscription(
+            String,
+            self.searching_mode_status_topic,
+            self._on_searching_mode_status_received,
             10,
         )
 
@@ -131,6 +171,7 @@ class AgvGuiNode(Node):
         status_frame.grid(row=1, column=0, columnspan=2, pady=(12, 0), sticky="ew")
         status_frame.columnconfigure(1, weight=1)
         status_frame.columnconfigure(3, weight=1)
+        status_frame.columnconfigure(5, weight=1)
 
         self.orientation_indicator = self._create_indicator(
             status_frame,
@@ -143,6 +184,12 @@ class AgvGuiNode(Node):
             "Position",
             row=0,
             column=2,
+        )
+        self.harvesting_indicator = self._create_indicator(
+            status_frame,
+            "Harvesting",
+            row=0,
+            column=4,
         )
 
         self.notebook = ttk.Notebook(main_frame)
@@ -206,8 +253,22 @@ class AgvGuiNode(Node):
             height=2,
         )
         self.stop_button.grid(row=4, column=0, columnspan=2, sticky="ew")
+
+        self.cobot_button = tk.Button(
+            main_frame,
+            text="Cobot",
+            command=self._toggle_cobot_searching_mode,
+            bg="#6a1b9a",
+            fg="white",
+            activebackground="#4a148c",
+            activeforeground="white",
+            width=18,
+            height=2,
+        )
+        self.cobot_button.grid(row=5, column=0, columnspan=2, pady=(8, 0), sticky="ew")
         self._update_mode_button()
         self._update_control_indicators()
+        self._update_cobot_button()
 
     def _create_indicator(
         self,
@@ -368,6 +429,11 @@ class AgvGuiNode(Node):
         msg.data = self.control_mode
         self.pub_control_mode.publish(msg)
 
+    def _publish_searching_mode_command(self, command: str) -> None:
+        msg = String()
+        msg.data = command
+        self.pub_searching_mode_cmd.publish(msg)
+
     def _publish_command(self) -> None:
         if self.is_closing:
             return
@@ -393,6 +459,18 @@ class AgvGuiNode(Node):
         self.free_stop_active = True
         self._publish_free_mode_command()
         self._update_command_label()
+
+    def _toggle_cobot_searching_mode(self) -> None:
+        command = "STOP" if self.searching_mode_active else "START"
+        self._publish_searching_mode_command(command)
+        self.searching_mode_active = command == "START"
+        self.harvesting_active = False
+        self.harvesting_refining_active = False
+        self._update_cobot_button()
+        self._update_control_indicators()
+        self.get_logger().info(
+            f"Cobot button -> {self.searching_mode_cmd_topic} {command}"
+        )
 
     def _toggle_control_mode(self) -> None:
         if self.control_mode == CONTROL_MODE_MANUAL:
@@ -452,6 +530,45 @@ class AgvGuiNode(Node):
         self._update_control_indicators()
         self._update_command_label()
 
+    def _on_searching_mode_status_received(self, msg: String) -> None:
+        status = msg.data.strip().upper()
+        if status == "BUSY":
+            self.searching_mode_active = True
+            self.harvesting_active = False
+            self.harvesting_refining_active = False
+        elif status == "REFINING":
+            self.searching_mode_active = True
+            self.harvesting_active = False
+            self.harvesting_refining_active = True
+        elif status == "HARVESTING":
+            self.searching_mode_active = True
+            self.harvesting_active = True
+            self.harvesting_refining_active = False
+        elif status in ("IDLE", "DONE_OK", "DONE_FAIL"):
+            self.searching_mode_active = False
+            self.harvesting_active = False
+            self.harvesting_refining_active = False
+        else:
+            return
+
+        self._update_cobot_button()
+        self._update_control_indicators()
+
+    def _update_cobot_button(self) -> None:
+        if self.searching_mode_active:
+            self.cobot_button.configure(
+                text="Stop Cobot",
+                bg="#c62828",
+                activebackground="#8e0000",
+            )
+            return
+
+        self.cobot_button.configure(
+            text="Cobot",
+            bg="#6a1b9a",
+            activebackground="#4a148c",
+        )
+
     def _clear_automatic_status(self) -> None:
         self.position_control_active = False
         self.orientation_control_active = False
@@ -467,10 +584,21 @@ class AgvGuiNode(Node):
             self.position_indicator,
             self.position_control_active,
         )
+        self._set_indicator(
+            self.harvesting_indicator,
+            self.harvesting_active or self.harvesting_refining_active,
+            INDICATOR_REFINING_COLOR
+            if self.harvesting_refining_active
+            else INDICATOR_ON_COLOR,
+        )
 
     @staticmethod
-    def _set_indicator(indicator: tk.Canvas, is_active: bool) -> None:
-        color = INDICATOR_ON_COLOR if is_active else INDICATOR_OFF_COLOR
+    def _set_indicator(
+        indicator: tk.Canvas,
+        is_active: bool,
+        active_color: str = INDICATOR_ON_COLOR,
+    ) -> None:
+        color = active_color if is_active else INDICATOR_OFF_COLOR
         indicator.itemconfigure("light", fill=color, outline=color)
 
     @staticmethod
