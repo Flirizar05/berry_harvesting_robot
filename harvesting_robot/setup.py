@@ -19,9 +19,10 @@ setup(
     ],
     install_requires=[
         "setuptools",
-        "opencv-python",
-        "numpy",
+        "opencv-python>=4.6,<4.12",
+        "numpy>=1.23,<2",
         "pyrealsense2",
+        "ultralytics",
     ],
     zip_safe=True,
     maintainer="Francisco Irizar",

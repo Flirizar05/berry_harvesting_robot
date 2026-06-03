@@ -25,7 +25,7 @@ DEFAULT_SEARCH_JOINT_NAMES = [
     "joint_5",
     "joint_6",
 ]
-DEFAULT_SEARCH_JOINT_POSITIONS_DEG = [0.0, -93.0, -147.0, 0.0, -34.0, 90.0]
+DEFAULT_SEARCH_JOINT_POSITIONS_DEG = [0.0, -93.0, -147.0, 0.0, -34.0, 154.0]
 DEFAULT_TARGET_DISTANCE_REFERENCE_XYZ = [0.0, 0.0, 0.28481]
 AGV_CONTROL_MODE_AUTOMATIC = "automatic"
 AGV_CONTROL_MODE_MANUAL = "manual"
@@ -127,7 +127,7 @@ class SearchingModeNode(Node):
             "annotated_image_topic",
             "/searching_mode/annotated_image",
         )
-        self.declare_parameter("show_preview", True)
+        self.declare_parameter("show_preview", False)
         self.declare_parameter("preview_window", "Searching Mode Detections")
         self.declare_parameter("output_point_topic", "/camera_sphere")
         self.declare_parameter("target_base_topic", "/target_base")
@@ -151,6 +151,11 @@ class SearchingModeNode(Node):
 
         share_dir = get_package_share_directory("harvesting_robot")
         models_dir = os.path.join(share_dir, "models")
+        self.declare_parameter(
+            "model_path",
+            os.path.join(models_dir, "best.pt"),
+        )
+        self.declare_parameter("yolo_device", "0")
         self.declare_parameter(
             "cfg_path",
             os.path.join(models_dir, "yolov4-tiny-custom.cfg"),
@@ -290,6 +295,10 @@ class SearchingModeNode(Node):
             dtype=float,
         )
 
+        self.model_path = os.path.expanduser(
+            str(self.get_parameter("model_path").value)
+        )
+        self.yolo_device = str(self.get_parameter("yolo_device").value).strip()
         self.config_path = os.path.expanduser(str(self.get_parameter("cfg_path").value))
         self.weights_path = os.path.expanduser(
             str(self.get_parameter("weights_path").value)
@@ -325,27 +334,38 @@ class SearchingModeNode(Node):
         )
 
     def _load_yolo_model(self) -> None:
-        for path, label in (
-            (self.class_names_path, "names"),
-            (self.weights_path, "weights"),
-            (self.config_path, "cfg"),
-        ):
-            if not os.path.isfile(path):
-                raise FileNotFoundError(f"Missing YOLO {label} file: {path}")
+        if not os.path.isfile(self.model_path):
+            raise FileNotFoundError(f"Missing YOLO model file: {self.model_path}")
 
-        with open(self.class_names_path, "r", encoding="utf-8") as file:
-            self.class_names = [line.strip() for line in file.readlines()]
+        try:
+            from ultralytics import YOLO
+        except ImportError as exc:
+            raise ImportError(
+                "The searching_mode_node now uses an Ultralytics YOLO .pt model. "
+                "Install it with: pip install ultralytics"
+            ) from exc
 
-        self.net = cv2.dnn.readNetFromDarknet(self.config_path, self.weights_path)
-        self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
-        self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+        self.yolo_device = self._resolve_yolo_device(self.yolo_device)
+        self.yolo_model = YOLO(self.model_path)
+        self.class_names = self._normalize_class_names(
+            getattr(self.yolo_model, "names", None)
+        )
+        if not self.class_names and os.path.isfile(self.class_names_path):
+            with open(self.class_names_path, "r", encoding="utf-8") as file:
+                self.class_names = [line.strip() for line in file.readlines()]
 
-        layer_names = self.net.getLayerNames()
-        unconnected_layers = np.array(self.net.getUnconnectedOutLayers()).flatten()
-        self.output_layers = [
-            layer_names[int(layer_id) - 1]
-            for layer_id in unconnected_layers
-        ]
+        self.get_logger().info(
+            "Using Ultralytics YOLO model:\n"
+            f"  model: {self.model_path}\n"
+            f"  device: {self.yolo_device or 'auto'}\n"
+            f"  classes: {', '.join(self.class_names) if self.class_names else 'unknown'}"
+        )
+
+        if self.class_names and not 0 <= self.target_class_id < len(self.class_names):
+            self.get_logger().warn(
+                f"target_class_id={self.target_class_id} is outside the "
+                f"model class range 0..{len(self.class_names) - 1}"
+            )
 
     def _create_ros_interfaces(self) -> None:
         self.status_publisher = self.create_publisher(String, self.status_topic, 10)
@@ -985,60 +1005,49 @@ class SearchingModeNode(Node):
     ) -> list[dict[str, float | int | str]]:
         image_height, image_width = color_image.shape[:2]
 
-        blob = cv2.dnn.blobFromImage(
-            color_image,
-            1.0 / 255.0,
-            (416, 416),
-            swapRB=True,
-            crop=False,
+        rgb_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
+        results = self.yolo_model(
+            rgb_image,
+            conf=self.confidence_threshold,
+            device=self.yolo_device or None,
+            iou=self.nms_threshold,
+            verbose=False,
         )
-        self.net.setInput(blob)
-        outputs = self.net.forward(self.output_layers)
-
-        boxes = []
-        confidences = []
-        class_ids = []
-
-        for output in outputs:
-            for detection in output:
-                scores = detection[5:]
-                class_id = int(np.argmax(scores))
-                confidence = float(scores[class_id])
-                if confidence < self.confidence_threshold:
-                    continue
-
-                center_x = int(detection[0] * image_width)
-                center_y = int(detection[1] * image_height)
-                box_width = int(detection[2] * image_width)
-                box_height = int(detection[3] * image_height)
-                top_left_x = int(center_x - box_width / 2)
-                top_left_y = int(center_y - box_height / 2)
-
-                boxes.append([top_left_x, top_left_y, box_width, box_height])
-                confidences.append(confidence)
-                class_ids.append(class_id)
-
-        if not boxes:
+        if not results:
             return []
 
-        kept_indexes = cv2.dnn.NMSBoxes(
-            boxes,
-            confidences,
-            self.confidence_threshold,
-            self.nms_threshold,
-        )
-        if kept_indexes is None or len(kept_indexes) == 0:
+        result = results[0]
+        yolo_boxes = getattr(result, "boxes", None)
+        if yolo_boxes is None or len(yolo_boxes) == 0:
             return []
+
+        xyxy_boxes = self._to_numpy(yolo_boxes.xyxy)
+        confidences = self._to_numpy(yolo_boxes.conf)
+        class_ids = self._to_numpy(yolo_boxes.cls).astype(int)
 
         detections = []
-        for index in np.array(kept_indexes).flatten():
-            class_id = int(class_ids[index])
+        for xyxy, confidence, class_id in zip(xyxy_boxes, confidences, class_ids):
+            class_id = int(class_id)
             if class_id != self.target_class_id:
                 continue
 
-            x, y, box_width, box_height = boxes[index]
-            center_u = float(x + box_width / 2.0)
-            center_v = float(y + box_height / 2.0)
+            confidence = float(confidence)
+            if confidence < self.confidence_threshold:
+                continue
+
+            x0 = max(0.0, min(float(image_width - 1), float(xyxy[0])))
+            y0 = max(0.0, min(float(image_height - 1), float(xyxy[1])))
+            x1 = max(0.0, min(float(image_width - 1), float(xyxy[2])))
+            y1 = max(0.0, min(float(image_height - 1), float(xyxy[3])))
+            if x1 <= x0 or y1 <= y0:
+                continue
+
+            x = int(round(x0))
+            y = int(round(y0))
+            box_width = max(1, int(round(x1 - x0)))
+            box_height = max(1, int(round(y1 - y0)))
+            center_u = float((x0 + x1) / 2.0)
+            center_v = float((y0 + y1) / 2.0)
 
             depth_m = self._depth_from_bbox(
                 depth_image,
@@ -1067,7 +1076,7 @@ class SearchingModeNode(Node):
                     "camera_y_m": float(camera_y_m),
                     "center_u": center_u,
                     "center_v": center_v,
-                    "confidence": float(confidences[index]),
+                    "confidence": confidence,
                     "class_id": int(class_id),
                     "class_name": self._class_name(class_id),
                     "bbox_x": int(x),
@@ -1078,6 +1087,54 @@ class SearchingModeNode(Node):
             )
 
         return detections
+
+    @staticmethod
+    def _to_numpy(value) -> np.ndarray:
+        if hasattr(value, "detach"):
+            value = value.detach()
+        if hasattr(value, "cpu"):
+            value = value.cpu()
+        if hasattr(value, "numpy"):
+            return value.numpy()
+
+        return np.asarray(value)
+
+    def _resolve_yolo_device(self, requested_device: str) -> str:
+        device = str(requested_device).strip()
+        if device.lower() in ("", "none", "auto"):
+            return ""
+
+        if device.lower() == "cpu":
+            return "cpu"
+
+        try:
+            import torch
+        except ImportError:
+            self.get_logger().warn(
+                f"YOLO device '{device}' requested but torch is not installed; using CPU"
+            )
+            return "cpu"
+
+        if torch.cuda.is_available():
+            return device
+
+        self.get_logger().warn(
+            f"YOLO device '{device}' requested but CUDA is not available; using CPU"
+        )
+        return "cpu"
+
+    @staticmethod
+    def _normalize_class_names(class_names) -> list[str]:
+        if isinstance(class_names, dict):
+            return [
+                str(class_names[key])
+                for key in sorted(class_names, key=lambda item: int(item))
+            ]
+
+        if isinstance(class_names, (list, tuple)):
+            return [str(class_name) for class_name in class_names]
+
+        return []
 
     @staticmethod
     def _closest_detection(

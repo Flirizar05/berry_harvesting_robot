@@ -29,6 +29,11 @@ def generate_launch_description():
         #"elfin3.urdf",
         "gen3.urdf",
     )
+    default_search_model_path = os.path.join(
+        harvesting_robot_share,
+        "models",
+        "best.pt",
+    )
 
     nodes = [
         # ---------------------------------------------------------------------
@@ -173,6 +178,8 @@ def generate_launch_description():
                 "agv_stop_period_sec": pv("search_agv_stop_period_sec", float),
                 "target_stop_distance_m": pv("search_target_stop_distance_m", float),
                 "final_target_timeout_sec": pv("search_final_target_timeout_sec", float),
+                "model_path": pv("search_model_path", str),
+                "yolo_device": pv("search_yolo_device", str),
                 "conf_thresh": pv("search_conf_thresh", float),
                 "nms_thresh": pv("search_nms_thresh", float),
                 "target_class_id": pv("search_target_class_id", int),
@@ -324,7 +331,7 @@ def generate_launch_description():
         DeclareLaunchArgument("search_final_pose_horizon_sec", default_value="2.0"),
         DeclareLaunchArgument("search_detection_result_topic", default_value="/searching_mode/detection"),
         DeclareLaunchArgument("search_annotated_image_topic", default_value="/searching_mode/annotated_image"),
-        DeclareLaunchArgument("search_show_preview", default_value="true"),
+        DeclareLaunchArgument("search_show_preview", default_value="false"),
         DeclareLaunchArgument("search_preview_window", default_value="Searching Mode Detections"),
         DeclareLaunchArgument("search_output_point_topic", default_value="/camera_sphere"),
         DeclareLaunchArgument("search_trigger_eyeinhand_compute", default_value="true"),
@@ -339,6 +346,11 @@ def generate_launch_description():
         DeclareLaunchArgument("search_agv_stop_period_sec", default_value="0.05"),
         DeclareLaunchArgument("search_target_stop_distance_m", default_value="1.0"),
         DeclareLaunchArgument("search_final_target_timeout_sec", default_value="3.0"),
+        DeclareLaunchArgument(
+            "search_model_path",
+            default_value=default_search_model_path,
+        ),
+        DeclareLaunchArgument("search_yolo_device", default_value="0"),
         DeclareLaunchArgument("search_conf_thresh", default_value="0.6"),
         DeclareLaunchArgument("search_nms_thresh", default_value="0.4"),
         DeclareLaunchArgument("search_target_class_id", default_value="2"),
