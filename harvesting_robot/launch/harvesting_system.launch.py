@@ -1,7 +1,8 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -21,12 +22,10 @@ def generate_launch_description():
         harvesting_robot_share,
         "launch",
         "eyeinhandkinova.launch.py",
-        #"eyeinhand.launch.py",
     )
     default_urdf_path = os.path.join(
         harvesting_robot_share,
         "urdf",
-        #"elfin3.urdf",
         "gen3.urdf",
     )
     default_search_model_path = os.path.join(
@@ -66,6 +65,7 @@ def generate_launch_description():
             package="harvesting_robot",
             executable="mode1_vision_node",
             name="mode1_vision_node",
+            condition=UnlessCondition(LaunchConfiguration("mode1_use_pf_vision")),
             output="screen",
             parameters=[{
                 "cmd_topic": pv("vision_cmd_topic", str),
@@ -87,12 +87,16 @@ def generate_launch_description():
         ),
 
         # ---------------------------------------------------------------------
-        # Mode 2 vision node
+        # Potential fields vision node used by Mode 1 PF vision and optional Mode 2.
         # ---------------------------------------------------------------------
         Node(
             package="harvesting_robot",
             executable="mode2_vision_node",
             name="mode2_vision_node",
+            condition=IfCondition(PythonExpression([
+                "'", LaunchConfiguration("enable_mode2"), "'.lower() == 'true' or '",
+                LaunchConfiguration("mode1_use_pf_vision"), "'.lower() == 'true'",
+            ])),
             output="screen",
             parameters=[{
                 "cmd_topic": pv("pf_cmd_topic", str),
@@ -104,6 +108,11 @@ def generate_launch_description():
                 "camera_info_topic": pv("camera_color_info_topic", str),
                 "depth_scale_topic": pv("depth_scale_topic", str),
                 "depth_scale_fallback": pv("depth_scale_fallback", float),
+                "model_path": pv("search_model_path", str),
+                "yolo_device": pv("search_yolo_device", str),
+                "conf_thresh": pv("search_conf_thresh", float),
+                "nms_thresh": pv("search_nms_thresh", float),
+                "target_class_id": pv("search_target_class_id", int),
             }],
         ),
 
@@ -130,68 +139,6 @@ def generate_launch_description():
         ),
 
         # ---------------------------------------------------------------------
-        # Searching mode node
-        # ---------------------------------------------------------------------
-        Node(
-            package="harvesting_robot",
-            executable="searching_mode_node",
-            name="searching_mode_node",
-            output="screen",
-            parameters=[{
-                "cmd_topic": pv("search_cmd_topic", str),
-                "status_topic": pv("search_status_topic", str),
-                "controller_topic": pv("controller_topic", str),
-                "pose_horizon_sec": pv("search_pose_horizon_sec", float),
-                "oscillation_horizon_sec": pv("search_oscillation_horizon_sec", float),
-                "oscillation_min_deg": pv("search_oscillation_min_deg", float),
-                "oscillation_max_deg": pv("search_oscillation_max_deg", float),
-                "oscillation_joint_index": pv("search_oscillation_joint_index", int),
-                "left_refine_min_deg": pv("search_left_refine_min_deg", float),
-                "left_refine_max_deg": pv("search_left_refine_max_deg", float),
-                "right_refine_min_deg": pv("search_right_refine_min_deg", float),
-                "right_refine_max_deg": pv("search_right_refine_max_deg", float),
-                "left_final_deg": pv("search_left_final_deg", float),
-                "right_final_deg": pv("search_right_final_deg", float),
-                "final_pose_horizon_sec": pv("search_final_pose_horizon_sec", float),
-                "color_topic": pv("camera_color_topic", str),
-                "depth_topic": pv("camera_depth_topic", str),
-                "camera_info_topic": pv("camera_color_info_topic", str),
-                "depth_scale_topic": pv("depth_scale_topic", str),
-                "depth_scale_fallback": pv("depth_scale_fallback", float),
-                "joint_state_topic": pv("joint_state_topic", str),
-                "detection_result_topic": pv("search_detection_result_topic", str),
-                "annotated_image_topic": pv("search_annotated_image_topic", str),
-                "show_preview": pv("search_show_preview", bool),
-                "preview_window": pv("search_preview_window", str),
-                "output_point_topic": pv("search_output_point_topic", str),
-                "target_base_topic": pv("target_topic", str),
-                "eye_cmd_topic": pv("eye_cmd_topic", str),
-                "trigger_eyeinhand_compute": pv("search_trigger_eyeinhand_compute", bool),
-                "eye_compute_delay_sec": pv("search_eye_compute_delay_sec", float),
-                "detection_period_sec": pv("search_detection_period_sec", float),
-                "berry_lost_timeout_sec": pv("search_berry_lost_timeout_sec", float),
-                "agv_cmd_topic": pv("agv_cmd_topic", str),
-                "agv_control_mode_topic": pv("agv_control_mode_topic", str),
-                "agv_stop_command": pv("search_agv_stop_command", str),
-                "agv_manual_command": pv("search_agv_manual_command", str),
-                "agv_automatic_command": pv("search_agv_automatic_command", str),
-                "agv_stop_period_sec": pv("search_agv_stop_period_sec", float),
-                "target_stop_distance_m": pv("search_target_stop_distance_m", float),
-                "final_target_timeout_sec": pv("search_final_target_timeout_sec", float),
-                "model_path": pv("search_model_path", str),
-                "yolo_device": pv("search_yolo_device", str),
-                "conf_thresh": pv("search_conf_thresh", float),
-                "nms_thresh": pv("search_nms_thresh", float),
-                "target_class_id": pv("search_target_class_id", int),
-                "min_valid_depth_m": pv("search_min_valid_depth_m", float),
-                "max_valid_depth_m": pv("search_max_valid_depth_m", float),
-                "negative_joint_side": pv("search_negative_joint_side", str),
-                "side_deadband_deg": pv("search_side_deadband_deg", float),
-                "joint_state_max_age_sec": pv("search_joint_state_max_age_sec", float),
-            }],
-        ),
-
-        # ---------------------------------------------------------------------
         # Mode 2 trajectory node
         # Publishes to the same waypoint topic consumed by control_node.
         # ---------------------------------------------------------------------
@@ -199,6 +146,7 @@ def generate_launch_description():
             package="harvesting_robot_cpp",
             executable="mode2_trajectory_node",
             name="mode2_trajectory_node",
+            condition=IfCondition(LaunchConfiguration("enable_mode2")),
             output="screen",
             parameters=[{
                 "cmd_topic": pv("hyrrt_cmd_topic", str),
@@ -261,13 +209,32 @@ def generate_launch_description():
             package="harvesting_robot",
             executable="gripper_node",
             name="gripper_node",
+            condition=IfCondition(LaunchConfiguration("enable_gripper")),
             output="screen",
+            parameters=[{
+                "esp32_ip": pv("gripper_esp32_ip", str),
+                "esp32_port": pv("gripper_esp32_port", int),
+                "grasp_cmd": pv("gripper_grasp_cmd", str),
+                "release_cmd": pv("gripper_release_cmd", str),
+                "connect_timeout_sec": pv("gripper_connect_timeout_sec", float),
+                "response_timeout_sec": pv("gripper_response_timeout_sec", float),
+                "wait_for_response": pv("gripper_wait_for_response", bool),
+                "append_newline": pv("gripper_append_newline", bool),
+            }],
         ),
         Node(
             package="harvesting_robot",
             executable="master_node",
             name="master_node",
             output="screen",
+            parameters=[{
+                "enable_mode2": pv("enable_mode2", bool),
+                "enable_gripper": pv("enable_gripper", bool),
+                "mode1_use_pf_vision": pv("mode1_use_pf_vision", bool),
+                "do_home_on_start": pv("do_home_on_start", bool),
+                "controller_topic": pv("controller_topic", str),
+                "joint_state_topic": pv("joint_state_topic", str),
+            }],
         ),
     ]
 
@@ -276,12 +243,10 @@ def generate_launch_description():
         # Frames and robot interfaces
         # ---------------------------------------------------------------------
         DeclareLaunchArgument("base_frame", default_value="base_link"),
-        #DeclareLaunchArgument("base_frame", default_value="elfin_base"),
         DeclareLaunchArgument("joint_state_topic", default_value="/joint_states"),
         DeclareLaunchArgument(
             "controller_topic",
             default_value="/joint_trajectory_controller/joint_trajectory",
-            #default_value="/elfin_arm_controller/joint_trajectory",
         ),
 
         # ---------------------------------------------------------------------
@@ -307,45 +272,19 @@ def generate_launch_description():
         # ---------------------------------------------------------------------
         DeclareLaunchArgument("vision_cmd_topic", default_value="/vision/cmd"),
         DeclareLaunchArgument("vision_status_topic", default_value="/vision/status"),
-        DeclareLaunchArgument("vision_show_preview", default_value="true"),
+        DeclareLaunchArgument("vision_show_preview", default_value="false"),
 
         # ---------------------------------------------------------------------
-        # Searching mode
+        # High-level mode switches
         # ---------------------------------------------------------------------
-        DeclareLaunchArgument("search_cmd_topic", default_value="/searching_mode/cmd"),
-        DeclareLaunchArgument(
-            "search_status_topic",
-            default_value="/searching_mode/status",
-        ),
-        DeclareLaunchArgument("search_pose_horizon_sec", default_value="2.0"),
-        DeclareLaunchArgument("search_oscillation_horizon_sec", default_value="2.0"),
-        DeclareLaunchArgument("search_oscillation_min_deg", default_value="-45.0"),
-        DeclareLaunchArgument("search_oscillation_max_deg", default_value="45.0"),
-        DeclareLaunchArgument("search_oscillation_joint_index", default_value="0"),
-        DeclareLaunchArgument("search_left_refine_min_deg", default_value="-90.0"),
-        DeclareLaunchArgument("search_left_refine_max_deg", default_value="-45.0"),
-        DeclareLaunchArgument("search_right_refine_min_deg", default_value="45.0"),
-        DeclareLaunchArgument("search_right_refine_max_deg", default_value="90.0"),
-        DeclareLaunchArgument("search_left_final_deg", default_value="-90.0"),
-        DeclareLaunchArgument("search_right_final_deg", default_value="90.0"),
-        DeclareLaunchArgument("search_final_pose_horizon_sec", default_value="2.0"),
-        DeclareLaunchArgument("search_detection_result_topic", default_value="/searching_mode/detection"),
-        DeclareLaunchArgument("search_annotated_image_topic", default_value="/searching_mode/annotated_image"),
-        DeclareLaunchArgument("search_show_preview", default_value="false"),
-        DeclareLaunchArgument("search_preview_window", default_value="Searching Mode Detections"),
-        DeclareLaunchArgument("search_output_point_topic", default_value="/camera_sphere"),
-        DeclareLaunchArgument("search_trigger_eyeinhand_compute", default_value="true"),
-        DeclareLaunchArgument("search_eye_compute_delay_sec", default_value="0.05"),
-        DeclareLaunchArgument("search_detection_period_sec", default_value="0.2"),
-        DeclareLaunchArgument("search_berry_lost_timeout_sec", default_value="3.0"),
-        DeclareLaunchArgument("agv_cmd_topic", default_value="/agv/rpm_cmd"),
-        DeclareLaunchArgument("agv_control_mode_topic", default_value="/agv/control_mode"),
-        DeclareLaunchArgument("search_agv_stop_command", default_value="s"),
-        DeclareLaunchArgument("search_agv_manual_command", default_value="manual"),
-        DeclareLaunchArgument("search_agv_automatic_command", default_value="automatic"),
-        DeclareLaunchArgument("search_agv_stop_period_sec", default_value="0.05"),
-        DeclareLaunchArgument("search_target_stop_distance_m", default_value="1.0"),
-        DeclareLaunchArgument("search_final_target_timeout_sec", default_value="3.0"),
+        DeclareLaunchArgument("enable_mode2", default_value="false"),
+        DeclareLaunchArgument("enable_gripper", default_value="false"),
+        DeclareLaunchArgument("mode1_use_pf_vision", default_value="true"),
+        DeclareLaunchArgument("do_home_on_start", default_value="true"),
+
+        # ---------------------------------------------------------------------
+        # PF vision model
+        # ---------------------------------------------------------------------
         DeclareLaunchArgument(
             "search_model_path",
             default_value=default_search_model_path,
@@ -386,8 +325,7 @@ def generate_launch_description():
             "urdf_path",
             default_value=default_urdf_path,
         ),
-        DeclareLaunchArgument("ee_link", default_value="end_effector_link"),
-        #DeclareLaunchArgument("ee_link", default_value="rg2ft_grasp_point"),
+        DeclareLaunchArgument("ee_link", default_value="tool_frame"),
 
         DeclareLaunchArgument("dt", default_value="0.02"),
         DeclareLaunchArgument("command_horizon_sec", default_value="0.05"),
@@ -426,6 +364,18 @@ def generate_launch_description():
         DeclareLaunchArgument("hyrrt_max_cartesian_vel", default_value="0.10"),
         DeclareLaunchArgument("hyrrt_flow_step", default_value="0.01"),
         DeclareLaunchArgument("hyrrt_waypoint_dt", default_value="0.01"),
+
+        # ---------------------------------------------------------------------
+        # ESP32 gripper
+        # ---------------------------------------------------------------------
+        DeclareLaunchArgument("gripper_esp32_ip", default_value="192.168.137.43"),
+        DeclareLaunchArgument("gripper_esp32_port", default_value="5000"),
+        DeclareLaunchArgument("gripper_grasp_cmd", default_value="a"),
+        DeclareLaunchArgument("gripper_release_cmd", default_value="b"),
+        DeclareLaunchArgument("gripper_connect_timeout_sec", default_value="3.0"),
+        DeclareLaunchArgument("gripper_response_timeout_sec", default_value="3.0"),
+        DeclareLaunchArgument("gripper_wait_for_response", default_value="true"),
+        DeclareLaunchArgument("gripper_append_newline", default_value="false"),
 
         *nodes,
     ])

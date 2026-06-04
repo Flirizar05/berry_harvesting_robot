@@ -29,6 +29,7 @@ DEFAULT_SEARCH_JOINT_POSITIONS_DEG = [0.0, -93.0, -147.0, 0.0, -34.0, 154.0]
 DEFAULT_TARGET_DISTANCE_REFERENCE_XYZ = [0.0, 0.0, 0.28481]
 AGV_CONTROL_MODE_AUTOMATIC = "automatic"
 AGV_CONTROL_MODE_MANUAL = "manual"
+DEFAULT_LIDAR_SIDE_CLEARANCE_TOPIC = "/agv/line_detections"
 
 
 class SearchingModeNode(Node):
@@ -63,8 +64,13 @@ class SearchingModeNode(Node):
         self.target_side = None
         self.is_finalizing_target = False
         self.final_target_confirmed = False
+        self.lidar_region_confirmation_active = False
+        self.lidar_region_detection_side = None
+        self.lidar_region_detection_time = None
         self.agv_control_mode = None
         self.agv_mode_before_stop = None
+        self.latest_agv_command = None
+        self.agv_command_before_lidar_stop = None
         self.latest_color_image = None
         self.latest_depth_image = None
         self.has_camera_info = False
@@ -144,6 +150,12 @@ class SearchingModeNode(Node):
         self.declare_parameter("agv_stop_period_sec", 0.05)
         self.declare_parameter("target_stop_distance_m", 1.0)
         self.declare_parameter("final_target_timeout_sec", 3.0)
+        self.declare_parameter(
+            "lidar_side_clearance_topic",
+            DEFAULT_LIDAR_SIDE_CLEARANCE_TOPIC,
+        )
+        self.declare_parameter("lidar_region_confirmation_timeout_sec", 3.0)
+        self.declare_parameter("camera_detection_recent_timeout_sec", 0.6)
         self.declare_parameter(
             "target_distance_reference_xyz",
             DEFAULT_TARGET_DISTANCE_REFERENCE_XYZ,
@@ -287,6 +299,17 @@ class SearchingModeNode(Node):
         self.final_target_timeout_sec = float(
             self.get_parameter("final_target_timeout_sec").value
         )
+        self.lidar_side_clearance_topic = str(
+            self.get_parameter("lidar_side_clearance_topic").value
+        ).strip()
+        if not self.lidar_side_clearance_topic:
+            self.lidar_side_clearance_topic = DEFAULT_LIDAR_SIDE_CLEARANCE_TOPIC
+        self.lidar_region_confirmation_timeout_sec = float(
+            self.get_parameter("lidar_region_confirmation_timeout_sec").value
+        )
+        self.camera_detection_recent_timeout_sec = float(
+            self.get_parameter("camera_detection_recent_timeout_sec").value
+        )
         self.target_distance_reference_xyz = np.array(
             [
                 float(value)
@@ -417,6 +440,18 @@ class SearchingModeNode(Node):
             self._on_agv_control_mode,
             10,
         )
+        self.create_subscription(
+            String,
+            self.agv_cmd_topic,
+            self._on_agv_command,
+            10,
+        )
+        self.create_subscription(
+            String,
+            self.lidar_side_clearance_topic,
+            self._on_lidar_side_clearance,
+            10,
+        )
         self.create_subscription(Image, self.color_topic, self._on_color_image, 10)
         self.create_subscription(Image, self.depth_topic, self._on_depth_image, 10)
         self.create_subscription(
@@ -504,6 +539,55 @@ class SearchingModeNode(Node):
 
         self.agv_control_mode = control_mode
 
+    def _on_agv_command(self, msg: String) -> None:
+        self.latest_agv_command = msg.data.strip()
+
+    def _on_lidar_side_clearance(self, msg: String) -> None:
+        if not self._should_accept_lidar_region_trigger():
+            return
+
+        try:
+            values = self._parse_key_value_message(msg.data)
+            count = int(values.get("side_clearance_count", "0"))
+            if count <= 0:
+                return
+
+            sticky = self._parse_bool(values.get("side_clearance_sticky"))
+            if sticky:
+                return
+
+            side = values.get("side_clearance_side", "none").strip().lower()
+            if side not in ("left", "right"):
+                return
+
+            nearest_m = self._parse_optional_float(
+                values.get("side_clearance_nearest_m")
+            )
+            x_m = self._parse_optional_float(values.get("side_clearance_x_m"))
+            y_m = self._parse_optional_float(values.get("side_clearance_y_m"))
+
+        except ValueError as error:
+            self.get_logger().warn(
+                f"Ignoring invalid lidar side clearance message: {error}"
+            )
+            return
+
+        self._handle_lidar_region_detection(
+            side=side,
+            count=count,
+            nearest_m=nearest_m,
+            x_m=x_m,
+            y_m=y_m,
+        )
+
+    def _should_accept_lidar_region_trigger(self) -> bool:
+        return (
+            self.is_busy
+            and not self.is_finalizing_target
+            and self.target_side is None
+            and not self._has_recent_camera_detection()
+        )
+
     def _on_target_base(self, msg: PointStamped) -> None:
         if (
             not self.is_busy
@@ -569,7 +653,11 @@ class SearchingModeNode(Node):
         self.target_side = None
         self.is_finalizing_target = False
         self.final_target_confirmed = False
+        self.lidar_region_confirmation_active = False
+        self.lidar_region_detection_side = None
+        self.lidar_region_detection_time = None
         self.agv_mode_before_stop = None
+        self.agv_command_before_lidar_stop = None
         self.latest_target_base_distance_m = None
         self.latest_target_base_time = None
         self.active_oscillation_min_deg = self.oscillation_min_deg
@@ -783,6 +871,15 @@ class SearchingModeNode(Node):
         )
         self.detection_result_publisher.publish(String(data=result))
 
+        if self.lidar_region_confirmation_active:
+            self._confirm_lidar_region_camera_detection(
+                detection,
+                side,
+                target_side,
+                joint_angle_deg,
+            )
+            return
+
         if self.target_side is not None:
             self._publish_camera_point(detection)
             self._schedule_eyeinhand_compute()
@@ -890,6 +987,10 @@ class SearchingModeNode(Node):
         self.is_finalizing_target = True
         self.is_oscillating = False
         self.final_target_confirmed = False
+        self.lidar_region_confirmation_active = False
+        self.lidar_region_detection_side = None
+        self.lidar_region_detection_time = None
+        self.agv_command_before_lidar_stop = None
         self.agv_mode_before_stop = self.agv_control_mode
         self._destroy_timer("oscillation_timer")
         self._destroy_timer("eye_compute_timer")
@@ -911,6 +1012,154 @@ class SearchingModeNode(Node):
             f"{self._final_joint_for_side(self.target_side):.1f} deg. "
             f"Waiting {self.final_target_timeout_sec:.1f}s for confirmation."
         )
+
+    def _handle_lidar_region_detection(
+        self,
+        side: str,
+        count: int,
+        nearest_m: float | None,
+        x_m: float | None,
+        y_m: float | None,
+    ) -> None:
+        if not self._should_accept_lidar_region_trigger():
+            return
+
+        review_joint_deg = self._final_joint_for_side(side)
+        self.lidar_region_confirmation_active = True
+        self.lidar_region_detection_side = side
+        self.lidar_region_detection_time = self.get_clock().now()
+        self.is_finalizing_target = True
+        self.is_oscillating = False
+        self.final_target_confirmed = False
+        self.agv_mode_before_stop = self.agv_control_mode
+        self.agv_command_before_lidar_stop = self.latest_agv_command
+        self._destroy_timer("oscillation_timer")
+        self._destroy_timer("eye_compute_timer")
+        self._publish_agv_stop_sequence()
+        self.status_publisher.publish(String(data="HARVESTING"))
+        self.final_stop_timer = self.create_timer(
+            self._positive_seconds(self.agv_stop_period_sec),
+            self._publish_agv_stop_sequence,
+        )
+        self._publish_lidar_region_review_pose(review_joint_deg)
+        self.final_confirmation_timer = self.create_timer(
+            self._positive_seconds(self.lidar_region_confirmation_timeout_sec),
+            self._recover_after_lidar_region_false_alarm,
+        )
+        self.detection_result_publisher.publish(
+            String(
+                data=(
+                    f"stage=lidar_region_trigger,"
+                    f"region_side={side},"
+                    f"count={count},"
+                    f"nearest_m={self._format_optional_float(nearest_m)},"
+                    f"x={self._format_optional_float(x_m)},"
+                    f"y={self._format_optional_float(y_m)},"
+                    f"review_joint_deg={review_joint_deg:.2f}"
+                )
+            )
+        )
+        self.get_logger().info(
+            "LiDAR side clearance detection while camera has no target. "
+            f"side={side}, nearest={self._format_optional_float(nearest_m)} m. "
+            f"Stopping AGV and moving cobot to {review_joint_deg:.1f} deg."
+        )
+
+    def _publish_lidar_region_review_pose(self, review_joint_deg: float) -> None:
+        target_positions_deg = list(self.search_joint_positions_deg)
+        target_positions_deg[self.oscillation_joint_index] = review_joint_deg
+        self._publish_joint_positions_deg(
+            target_positions_deg,
+            self.final_pose_horizon_sec,
+        )
+
+    def _confirm_lidar_region_camera_detection(
+        self,
+        detection: dict[str, float | int | str],
+        side: str,
+        target_side: str,
+        joint_angle_deg: float,
+    ) -> None:
+        if (
+            not self.lidar_region_confirmation_active
+            or self.final_target_confirmed
+        ):
+            return
+
+        self.final_target_confirmed = True
+        self._destroy_timer("final_confirmation_timer")
+        self._publish_agv_stop_sequence()
+        self.status_publisher.publish(String(data="HARVESTING"))
+        self.detection_result_publisher.publish(
+            String(
+                data=(
+                    f"stage=lidar_region_camera_confirmed,"
+                    f"region_side={self.lidar_region_detection_side or 'unknown'},"
+                    f"side={side},"
+                    f"target_side={target_side},"
+                    f"joint_deg={joint_angle_deg:.2f},"
+                    f"camera_z_m={float(detection['distance_m']):.3f},"
+                    f"camera_x_m={float(detection['camera_x_m']):.3f},"
+                    f"camera_y_m={float(detection['camera_y_m']):.3f},"
+                    f"confidence={float(detection['confidence']):.2f}"
+                )
+            )
+        )
+        self.get_logger().info(
+            "LiDAR region trigger confirmed by camera. "
+            "Keeping HARVESTING active and AGV stopped."
+        )
+
+    def _recover_after_lidar_region_false_alarm(self) -> None:
+        self._destroy_timer("final_confirmation_timer")
+        if (
+            not self.lidar_region_confirmation_active
+            or self.final_target_confirmed
+        ):
+            return
+
+        previous_side = self.lidar_region_detection_side
+        previous_mode = self.agv_mode_before_stop
+        previous_command = self.agv_command_before_lidar_stop
+        self._destroy_timer("final_stop_timer")
+
+        self.lidar_region_confirmation_active = False
+        self.lidar_region_detection_side = None
+        self.lidar_region_detection_time = None
+        self.is_finalizing_target = False
+        self.is_oscillating = True
+        self.final_target_confirmed = False
+        self._reset_to_full_oscillation(self.lidar_region_confirmation_timeout_sec)
+        self._restore_agv_after_lidar_false_alarm(previous_mode, previous_command)
+        self.detection_result_publisher.publish(
+            String(
+                data=(
+                    f"stage=lidar_region_false_alarm,"
+                    f"previous_region_side={previous_side or 'unknown'},"
+                    f"restored_mode={previous_mode or 'unknown'},"
+                    f"restored_command={previous_command or 'none'}"
+                )
+            )
+        )
+        self.agv_mode_before_stop = None
+        self.agv_command_before_lidar_stop = None
+        self.get_logger().warn(
+            "No camera berry found after LiDAR side region trigger. "
+            "Treating it as a false alarm and resuming search."
+        )
+
+    def _restore_agv_after_lidar_false_alarm(
+        self,
+        previous_mode: str | None,
+        previous_command: str | None,
+    ) -> None:
+        if previous_mode == AGV_CONTROL_MODE_AUTOMATIC:
+            self._publish_agv_automatic()
+            return
+
+        self._publish_agv_manual()
+        if previous_command:
+            self.agv_cmd_publisher.publish(String(data=previous_command))
 
     def _confirm_final_target(self, target_distance_m: float) -> None:
         if not self.is_finalizing_target or self.final_target_confirmed:
@@ -1416,6 +1665,52 @@ class SearchingModeNode(Node):
 
         return "center"
 
+    def _has_recent_camera_detection(self) -> bool:
+        if self.last_berry_detection_time is None:
+            return False
+
+        age_sec = (
+            self.get_clock().now() - self.last_berry_detection_time
+        ).nanoseconds * 1e-9
+        return age_sec <= max(0.0, self.camera_detection_recent_timeout_sec)
+
+    @staticmethod
+    def _parse_key_value_message(data: str) -> dict[str, str]:
+        values = {}
+
+        for item in data.split(","):
+            if not item:
+                continue
+
+            key, separator, value = item.partition("=")
+            if not separator:
+                raise ValueError(f"missing '=' in '{item}'")
+
+            values[key.strip()] = value.strip()
+
+        return values
+
+    @staticmethod
+    def _parse_optional_float(value: str | None) -> float | None:
+        if value is None or value.strip().lower() == "none":
+            return None
+
+        return float(value)
+
+    @staticmethod
+    def _parse_bool(value: str | None) -> bool:
+        if value is None:
+            return False
+
+        return value.strip().lower() in ("true", "1", "yes", "on")
+
+    @staticmethod
+    def _format_optional_float(value: float | None) -> str:
+        if value is None:
+            return "none"
+
+        return f"{value:.3f}"
+
     @staticmethod
     def _format_bool(value: bool) -> str:
         return "true" if value else "false"
@@ -1427,6 +1722,11 @@ class SearchingModeNode(Node):
         self.final_target_confirmed = False
         self.latest_target_base_distance_m = None
         self.latest_target_base_time = None
+        self.lidar_region_confirmation_active = False
+        self.lidar_region_detection_side = None
+        self.lidar_region_detection_time = None
+        self.agv_mode_before_stop = None
+        self.agv_command_before_lidar_stop = None
         self.robot_side = None
         self.target_side = None
         self._destroy_timer("initial_pose_timer")

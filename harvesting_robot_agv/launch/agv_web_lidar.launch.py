@@ -32,6 +32,21 @@ def generate_launch_description() -> LaunchDescription:
     target_horizontal_line_distance_m = LaunchConfiguration(
         "target_horizontal_line_distance_m"
     )
+    side_clearance_region_outer_offset_m = LaunchConfiguration(
+        "side_clearance_region_outer_offset_m"
+    )
+    side_clearance_region_forward_m = LaunchConfiguration(
+        "side_clearance_region_forward_m"
+    )
+    side_clearance_detection_min_points = LaunchConfiguration(
+        "side_clearance_detection_min_points"
+    )
+    side_clearance_sticky_timeout_sec = LaunchConfiguration(
+        "side_clearance_sticky_timeout_sec"
+    )
+    side_clearance_sticky_max_motion_m = LaunchConfiguration(
+        "side_clearance_sticky_max_motion_m"
+    )
 
     sllidar_launch = os.path.join(
         get_package_share_directory("sllidar_ros2"),
@@ -77,6 +92,46 @@ def generate_launch_description() -> LaunchDescription:
                     "reference lines and AGV position controller."
                 ),
             ),
+            DeclareLaunchArgument(
+                "side_clearance_region_outer_offset_m",
+                default_value="1.0",
+                description=(
+                    "Outer lateral edge of the side harvesting regions, in "
+                    "meters from the LiDAR center."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "side_clearance_region_forward_m",
+                default_value="1.0",
+                description=(
+                    "Forward length of the side harvesting regions from the "
+                    "AGV front line, in meters."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "side_clearance_detection_min_points",
+                default_value="1",
+                description=(
+                    "Minimum LiDAR points inside the side harvesting regions "
+                    "to publish a region detection."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "side_clearance_sticky_timeout_sec",
+                default_value="0.75",
+                description=(
+                    "Time before a non-moving side-region detection is "
+                    "suppressed while the AGV is moving."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "side_clearance_sticky_max_motion_m",
+                default_value="0.03",
+                description=(
+                    "Maximum position change treated as sticky/non-moving for "
+                    "side-region detections."
+                ),
+            ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(sllidar_launch),
                 launch_arguments={
@@ -96,6 +151,26 @@ def generate_launch_description() -> LaunchDescription:
                         "radar_image_topic": "/agv/lidar_radar_image",
                         "target_horizontal_line_distance_m": ParameterValue(
                             target_horizontal_line_distance_m,
+                            value_type=float,
+                        ),
+                        "side_clearance_region_outer_offset_m": ParameterValue(
+                            side_clearance_region_outer_offset_m,
+                            value_type=float,
+                        ),
+                        "side_clearance_region_forward_m": ParameterValue(
+                            side_clearance_region_forward_m,
+                            value_type=float,
+                        ),
+                        "side_clearance_detection_min_points": ParameterValue(
+                            side_clearance_detection_min_points,
+                            value_type=int,
+                        ),
+                        "side_clearance_sticky_timeout_sec": ParameterValue(
+                            side_clearance_sticky_timeout_sec,
+                            value_type=float,
+                        ),
+                        "side_clearance_sticky_max_motion_m": ParameterValue(
+                            side_clearance_sticky_max_motion_m,
                             value_type=float,
                         ),
                         "show_window": ParameterValue(

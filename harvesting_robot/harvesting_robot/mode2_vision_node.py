@@ -3,7 +3,7 @@
 
 import json
 import os
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
@@ -22,7 +22,7 @@ def normalize_command(command: str) -> str:
 
 
 class Mode2VisionNode(Node):
-    """Process shared camera topics and publish a target point for Mode 2."""
+    """Process shared camera topics and publish a PF vision target point."""
 
     def __init__(self) -> None:
         super().__init__("mode2_vision_node")
@@ -64,14 +64,8 @@ class Mode2VisionNode(Node):
         share_dir = get_package_share_directory("harvesting_robot")
         models_dir = os.path.join(share_dir, "models")
 
-        self.declare_parameter(
-            "cfg_path",
-            os.path.join(models_dir, "yolov4-tiny-custom.cfg"),
-        )
-        self.declare_parameter(
-            "weights_path",
-            os.path.join(models_dir, "yolov4-tiny-custom_best.weights"),
-        )
+        self.declare_parameter("model_path", os.path.join(models_dir, "best.pt"))
+        self.declare_parameter("yolo_device", "0")
         self.declare_parameter(
             "names_path",
             os.path.join(models_dir, "blackberry.names"),
@@ -115,12 +109,10 @@ class Mode2VisionNode(Node):
         self.declare_parameter("pub_r", "/blackberry/r")
 
     def _load_parameters(self) -> None:
-        self.config_path = os.path.expanduser(
-            str(self.get_parameter("cfg_path").value or "")
+        self.model_path = os.path.expanduser(
+            str(self.get_parameter("model_path").value or "")
         )
-        self.weights_path = os.path.expanduser(
-            str(self.get_parameter("weights_path").value or "")
-        )
+        self.yolo_device = str(self.get_parameter("yolo_device").value).strip()
         self.class_names_path = os.path.expanduser(
             str(self.get_parameter("names_path").value or "")
         )
@@ -182,22 +174,15 @@ class Mode2VisionNode(Node):
         self.legacy_r_topic = str(self.get_parameter("pub_r").value)
 
     def _validate_model_files(self) -> None:
-        required_files = [
-            (self.class_names_path, "names"),
-            (self.weights_path, "weights"),
-            (self.config_path, "cfg"),
-        ]
-
-        for file_path, label in required_files:
-            if not file_path or not os.path.isfile(file_path):
-                self.get_logger().error(f"Missing YOLO {label} file: '{file_path}'")
-                raise FileNotFoundError(file_path)
+        if not self.model_path or not os.path.isfile(self.model_path):
+            self.get_logger().error(f"Missing YOLO model file: '{self.model_path}'")
+            raise FileNotFoundError(self.model_path)
 
         self.get_logger().info(
-            "Using YOLO model files:\n"
-            f"  names:   {self.class_names_path}\n"
-            f"  weights: {self.weights_path}\n"
-            f"  cfg:     {self.config_path}\n"
+            "Using Ultralytics YOLO model:\n"
+            f"  model: {self.model_path}\n"
+            f"  device: {self.yolo_device or 'auto'}\n"
+            f"  names: {self.class_names_path}\n"
             f"  depth_scale_topic: {self.depth_scale_topic} "
             f"(fallback={self.depth_scale_m_per_unit})"
         )
@@ -213,16 +198,29 @@ class Mode2VisionNode(Node):
             self.show_result = False
 
     def _load_yolo_model(self) -> None:
-        with open(self.class_names_path, "r", encoding="utf-8") as file:
-            self.class_names = [line.strip() for line in file.readlines()]
+        try:
+            from ultralytics import YOLO
+        except ImportError as exc:
+            raise ImportError(
+                "mode2_vision_node now uses an Ultralytics YOLO .pt model. "
+                "Install the 'ultralytics' package in this ROS environment."
+            ) from exc
 
-        self.net = cv2.dnn.readNetFromDarknet(self.config_path, self.weights_path)
-        self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
-        self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+        self.yolo_device = self._resolve_yolo_device(self.yolo_device)
+        self.yolo_model = YOLO(self.model_path)
+        self.class_names = self._normalize_class_names(
+            getattr(self.yolo_model, "names", None)
+        )
 
-        layer_names = self.net.getLayerNames()
-        unconnected_layers = np.array(self.net.getUnconnectedOutLayers()).flatten()
-        self.output_layers = [layer_names[int(layer_id) - 1] for layer_id in unconnected_layers]
+        if not self.class_names and os.path.isfile(self.class_names_path):
+            with open(self.class_names_path, "r", encoding="utf-8") as file:
+                self.class_names = [line.strip() for line in file.readlines()]
+
+        if self.class_names and not 0 <= self.target_class_id < len(self.class_names):
+            self.get_logger().warn(
+                f"target_class_id={self.target_class_id} is outside the "
+                f"model class range 0..{len(self.class_names) - 1}"
+            )
 
     def _create_ros_interfaces(self) -> None:
         self.status_publisher = self.create_publisher(String, self.status_topic, 10)
@@ -514,67 +512,49 @@ class Mode2VisionNode(Node):
     ) -> Optional[Tuple[int, int, int, int, float, float, float, float, int]]:
         image_height, image_width = color_image.shape[:2]
 
-        blob = cv2.dnn.blobFromImage(
-            color_image,
-            1.0 / 255.0,
-            (416, 416),
-            swapRB=True,
-            crop=False,
+        rgb_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
+        results = self.yolo_model(
+            rgb_image,
+            conf=self.confidence_threshold,
+            device=self.yolo_device or None,
+            iou=self.nms_threshold,
+            verbose=False,
         )
-        self.net.setInput(blob)
-        outputs = self.net.forward(self.output_layers)
-
-        boxes: List[List[int]] = []
-        confidences: List[float] = []
-        class_ids: List[int] = []
-
-        for output in outputs:
-            for detection in output:
-                scores = detection[5:]
-                class_id = int(np.argmax(scores))
-                confidence = float(scores[class_id])
-
-                if confidence < self.confidence_threshold:
-                    continue
-
-                center_x = int(detection[0] * image_width)
-                center_y = int(detection[1] * image_height)
-                box_width = int(detection[2] * image_width)
-                box_height = int(detection[3] * image_height)
-                top_left_x = int(center_x - box_width / 2)
-                top_left_y = int(center_y - box_height / 2)
-
-                boxes.append([top_left_x, top_left_y, box_width, box_height])
-                confidences.append(confidence)
-                class_ids.append(class_id)
-
-        if not boxes:
+        if not results:
             return None
 
-        kept_indexes = cv2.dnn.NMSBoxes(
-            boxes,
-            confidences,
-            self.confidence_threshold,
-            self.nms_threshold,
-        )
-        if kept_indexes is None or len(kept_indexes) == 0:
+        result = results[0]
+        yolo_boxes = getattr(result, "boxes", None)
+        if yolo_boxes is None or len(yolo_boxes) == 0:
             return None
 
-        kept_indexes = np.array(kept_indexes).flatten()
+        xyxy_boxes = self._to_numpy(yolo_boxes.xyxy)
+        confidences = self._to_numpy(yolo_boxes.conf)
+        class_ids = self._to_numpy(yolo_boxes.cls).astype(int)
 
         best_target = None
         best_any_detection = None
 
-        for index in kept_indexes:
-            x, y, box_width, box_height = boxes[index]
-            class_id = class_ids[index]
-            confidence = float(confidences[index])
+        for xyxy, confidence, class_id in zip(xyxy_boxes, confidences, class_ids):
+            class_id = int(class_id)
+            confidence = float(confidence)
+            if confidence < self.confidence_threshold:
+                continue
 
-            label = (
-                self.class_names[class_id]
-                if 0 <= class_id < len(self.class_names)
-                else str(class_id)
-            )
+            x0_float = max(0.0, min(float(image_width - 1), float(xyxy[0])))
+            y0_float = max(0.0, min(float(image_height - 1), float(xyxy[1])))
+            x1_float = max(0.0, min(float(image_width - 1), float(xyxy[2])))
+            y1_float = max(0.0, min(float(image_height - 1), float(xyxy[3])))
+            if x1_float <= x0_float or y1_float <= y0_float:
+                continue
+
+            x = int(round(x0_float))
+            y = int(round(y0_float))
+            box_width = max(1, int(round(x1_float - x0_float)))
+            box_height = max(1, int(round(y1_float - y0_float)))
+            center_u = float((x0_float + x1_float) / 2.0)
+            center_v = float((y0_float + y1_float) / 2.0)
+            radius_px = float(max(x1_float - x0_float, y1_float - y0_float) / 2.0)
 
             box_color = (
                 (255, 0, 255)
@@ -590,7 +570,7 @@ class Mode2VisionNode(Node):
             cv2.rectangle(annotated_image, (x0, y0), (x1, y1), box_color, 2)
             cv2.putText(
                 annotated_image,
-                f"{label} {confidence:.2f}",
+                f"{self._class_name(class_id)} {confidence:.2f}",
                 (x0, max(0, y0 - 5)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
@@ -599,20 +579,47 @@ class Mode2VisionNode(Node):
             )
 
             if best_any_detection is None or confidence > best_any_detection[0]:
-                best_any_detection = (confidence, x, y, box_width, box_height, class_id)
+                best_any_detection = (
+                    confidence,
+                    x,
+                    y,
+                    box_width,
+                    box_height,
+                    center_u,
+                    center_v,
+                    radius_px,
+                    class_id,
+                )
 
             if class_id == self.target_class_id:
                 if best_target is None or confidence > best_target[0]:
-                    best_target = (confidence, x, y, box_width, box_height, class_id)
+                    best_target = (
+                        confidence,
+                        x,
+                        y,
+                        box_width,
+                        box_height,
+                        center_u,
+                        center_v,
+                        radius_px,
+                        class_id,
+                    )
 
         selected_detection = best_target if best_target is not None else best_any_detection
         if selected_detection is None:
             return None
 
-        confidence, x, y, box_width, box_height, class_id = selected_detection
-        center_u = float(x + box_width // 2)
-        center_v = float(y + box_height // 2)
-        radius_px = float(max(box_width, box_height) / 2.0)
+        (
+            confidence,
+            x,
+            y,
+            box_width,
+            box_height,
+            center_u,
+            center_v,
+            radius_px,
+            class_id,
+        ) = selected_detection
 
         return (
             int(x),
@@ -625,6 +632,60 @@ class Mode2VisionNode(Node):
             float(confidence),
             int(class_id),
         )
+
+    @staticmethod
+    def _to_numpy(value) -> np.ndarray:
+        if hasattr(value, "detach"):
+            value = value.detach()
+        if hasattr(value, "cpu"):
+            value = value.cpu()
+        if hasattr(value, "numpy"):
+            return value.numpy()
+
+        return np.asarray(value)
+
+    def _resolve_yolo_device(self, requested_device: str) -> str:
+        device = str(requested_device).strip()
+        if device.lower() in ("", "none", "auto"):
+            return ""
+
+        if device.lower() == "cpu":
+            return "cpu"
+
+        try:
+            import torch
+        except ImportError:
+            self.get_logger().warn(
+                f"YOLO device '{device}' requested but torch is not installed; using CPU"
+            )
+            return "cpu"
+
+        if torch.cuda.is_available():
+            return device
+
+        self.get_logger().warn(
+            f"YOLO device '{device}' requested but CUDA is not available; using CPU"
+        )
+        return "cpu"
+
+    @staticmethod
+    def _normalize_class_names(class_names) -> list[str]:
+        if isinstance(class_names, dict):
+            return [
+                str(class_names[key])
+                for key in sorted(class_names, key=lambda item: int(item))
+            ]
+
+        if isinstance(class_names, (list, tuple)):
+            return [str(class_name) for class_name in class_names]
+
+        return []
+
+    def _class_name(self, class_id: int) -> str:
+        if 0 <= class_id < len(self.class_names):
+            return self.class_names[class_id] or f"class_{class_id}"
+
+        return f"class_{class_id}"
 
     def _depth_to_meters(self, depth_value) -> float:
         if (

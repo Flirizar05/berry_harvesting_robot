@@ -12,7 +12,7 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 
 class MasterNode(Node):
-    """Coordinate the high-level execution flow for Mode 1 and Mode 2."""
+    """Coordinate the high-level execution flow for the harvesting robot."""
 
     def __init__(self) -> None:
         super().__init__("master_node")
@@ -41,25 +41,12 @@ class MasterNode(Node):
         self.declare_parameter("plan_timeout_sec", 6.0)
         self.declare_parameter("execute_timeout_sec", 180.0)
 
-        #self.declare_parameter("do_home_on_start", True)
-        self.declare_parameter("do_home_on_start", False)
+        self.declare_parameter("do_home_on_start", True)
         self.declare_parameter("home_timeout_sec", 20.0)
         self.declare_parameter("home_pos_tol_rad", 0.05)
         self.declare_parameter("home_settle_cycles", 10)
-        self.declare_parameter("home_horizon_sec", 2.0)
-        '''
-        self.declare_parameter(
-            "home_joint_names",
-            [
-                "elfin_joint1",
-                "elfin_joint2",
-                "elfin_joint3",
-                "elfin_joint4",
-                "elfin_joint5",
-                "elfin_joint6",
-            ],
-        )
-        '''
+        self.declare_parameter("home_horizon_sec", 5.0)
+        self.declare_parameter("home_command_period_sec", 0.5)
         self.declare_parameter(
             "home_joint_names",
             [
@@ -73,7 +60,7 @@ class MasterNode(Node):
         )
         self.declare_parameter(
             "home_joint_positions_rad",
-            [-1.67, -0.52, -1.39, -0.15, 2.39, 2.77],
+            [-1.570796, -1.623156, -2.565634, 0.0, -0.593412, 2.687807],
         )
 
         self.declare_parameter("master_cmd", "/master/cmd")
@@ -89,7 +76,6 @@ class MasterNode(Node):
         self.declare_parameter("ctrl_status", "/control/status")
 
         self.declare_parameter("tcp_target_dist_topic", "/trajectory/tcp_target_dist")
-        #self.declare_parameter("controller_topic", "/elfin_arm_controller/joint_trajectory")
         self.declare_parameter("controller_topic", "/joint_trajectory_controller/joint_trajectory")
         self.declare_parameter("joint_state_topic", "/joint_states")
 
@@ -140,6 +126,9 @@ class MasterNode(Node):
         self.home_pos_tol_rad = float(self.get_parameter("home_pos_tol_rad").value)
         self.home_settle_cycles = int(self.get_parameter("home_settle_cycles").value)
         self.home_horizon_sec = float(self.get_parameter("home_horizon_sec").value)
+        self.home_command_period_sec = float(
+            self.get_parameter("home_command_period_sec").value
+        )
 
         self.home_joint_names = list(self.get_parameter("home_joint_names").value)
         self.home_joint_positions = np.array(
@@ -246,6 +235,7 @@ class MasterNode(Node):
 
         self.current_joint_positions = None
         self.home_command_sent = False
+        self.home_last_command_time = None
         self.home_settle_count = 0
 
         self.mode2_hyrrt_finished = False
@@ -285,6 +275,7 @@ class MasterNode(Node):
         )
         trajectory_msg.points = [point]
         self.pub_home.publish(trajectory_msg)
+        self.home_last_command_time = self._now()
 
     def _start_mode1_vision_phase(self) -> None:
         if self.mode1_use_pf_vision:
@@ -315,6 +306,7 @@ class MasterNode(Node):
         self.latest_distance_time = None
 
         self.home_command_sent = False
+        self.home_last_command_time = None
         self.home_settle_count = 0
 
         self.mode2_hyrrt_finished = False
@@ -426,6 +418,16 @@ class MasterNode(Node):
                 self.home_command_sent = True
                 self.get_logger().info("HOME command sent.")
                 return
+
+            if self.home_last_command_time is None:
+                elapsed_since_home_command = self.home_command_period_sec
+            else:
+                elapsed_since_home_command = (
+                    self._now() - self.home_last_command_time
+                ).nanoseconds * 1e-9
+
+            if elapsed_since_home_command >= self.home_command_period_sec:
+                self._send_home_trajectory()
 
             if self.current_joint_positions is None:
                 if self._elapsed_phase_time() > self.home_timeout_sec:

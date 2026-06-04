@@ -36,6 +36,7 @@ DEFAULT_LINE_DETECTION_TOPIC = "/agv/line_detections"
 DEFAULT_RADAR_IMAGE_TOPIC = "/agv/lidar_radar_image"
 DEFAULT_RADAR_IMAGE_PUBLISH_PERIOD_SEC = 0.10
 DEFAULT_SHOW_WINDOW = True
+DEFAULT_AGV_CMD_TOPIC = "/agv/rpm_cmd"
 
 BACKGROUND_COLOR = (8, 12, 10)
 GRID_COLOR = (58, 82, 70)
@@ -60,6 +61,14 @@ AGV_WIDTH_M = 0.77
 AGV_LENGTH_M = 1.20
 AGV_FRONT_EDGE_BEHIND_LIDAR_M = 0.095
 AGV_LIDAR_TO_RIGHT_EDGE_M = 0.395
+SIDE_CLEARANCE_REGION_COLOR = (30, 190, 220)
+SIDE_CLEARANCE_REGION_ALPHA = 0.24
+DEFAULT_SIDE_CLEARANCE_REGION_OUTER_OFFSET_M = 1.0
+DEFAULT_SIDE_CLEARANCE_REGION_FORWARD_M = 0.1
+DEFAULT_SIDE_CLEARANCE_DETECTION_MIN_POINTS = 1
+DEFAULT_SIDE_CLEARANCE_STICKY_TIMEOUT_SEC = 0.75
+DEFAULT_SIDE_CLEARANCE_STICKY_MAX_MOTION_M = 0.03
+AGV_MOVING_RPM_EPSILON = 1.0
 
 
 @dataclass(frozen=True)
@@ -73,6 +82,14 @@ class StraightLineDetection:
     rmse_m: float
 
 
+@dataclass(frozen=True)
+class SideClearanceDetection:
+    side: str
+    xy_m: tuple[float, float]
+    distance_m: float
+    point_count: int
+
+
 class Lidar360RadarNode(Node):
     """OpenCV 360-degree radar view for a LaserScan topic."""
 
@@ -81,6 +98,10 @@ class Lidar360RadarNode(Node):
 
         self.latest_scan: LaserScan | None = None
         self.nearest_straight_line: StraightLineDetection | None = None
+        self.side_clearance_detection: SideClearanceDetection | None = None
+        self.side_clearance_sticky_suppressed = False
+        self.side_clearance_motion_track: tuple[str, tuple[float, float], float] | None = None
+        self.agv_command_is_moving = False
         self.last_radar_image_publish_time = 0.0
         self.is_closing = False
 
@@ -121,6 +142,7 @@ class Lidar360RadarNode(Node):
             DEFAULT_LINE_DETECTION_TOPIC,
         )
         self.declare_parameter("radar_image_topic", DEFAULT_RADAR_IMAGE_TOPIC)
+        self.declare_parameter("agv_cmd_topic", DEFAULT_AGV_CMD_TOPIC)
         self.declare_parameter(
             "radar_image_publish_period_sec",
             DEFAULT_RADAR_IMAGE_PUBLISH_PERIOD_SEC,
@@ -128,6 +150,26 @@ class Lidar360RadarNode(Node):
         self.declare_parameter(
             "target_horizontal_line_distance_m",
             DEFAULT_TARGET_HORIZONTAL_LINE_DISTANCE_M,
+        )
+        self.declare_parameter(
+            "side_clearance_region_outer_offset_m",
+            DEFAULT_SIDE_CLEARANCE_REGION_OUTER_OFFSET_M,
+        )
+        self.declare_parameter(
+            "side_clearance_region_forward_m",
+            DEFAULT_SIDE_CLEARANCE_REGION_FORWARD_M,
+        )
+        self.declare_parameter(
+            "side_clearance_detection_min_points",
+            DEFAULT_SIDE_CLEARANCE_DETECTION_MIN_POINTS,
+        )
+        self.declare_parameter(
+            "side_clearance_sticky_timeout_sec",
+            DEFAULT_SIDE_CLEARANCE_STICKY_TIMEOUT_SEC,
+        )
+        self.declare_parameter(
+            "side_clearance_sticky_max_motion_m",
+            DEFAULT_SIDE_CLEARANCE_STICKY_MAX_MOTION_M,
         )
         self.declare_parameter("show_window", DEFAULT_SHOW_WINDOW)
 
@@ -172,6 +214,11 @@ class Lidar360RadarNode(Node):
         ).strip()
         if not self.radar_image_topic:
             self.radar_image_topic = DEFAULT_RADAR_IMAGE_TOPIC
+        self.agv_cmd_topic = str(
+            self.get_parameter("agv_cmd_topic").value
+        ).strip()
+        if not self.agv_cmd_topic:
+            self.agv_cmd_topic = DEFAULT_AGV_CMD_TOPIC
         self.radar_image_publish_period_sec = self._positive_float_parameter(
             "radar_image_publish_period_sec",
             DEFAULT_RADAR_IMAGE_PUBLISH_PERIOD_SEC,
@@ -180,6 +227,31 @@ class Lidar360RadarNode(Node):
         self.target_horizontal_line_distance_m = self._positive_float_parameter(
             "target_horizontal_line_distance_m",
             DEFAULT_TARGET_HORIZONTAL_LINE_DISTANCE_M,
+            minimum=0.0,
+        )
+        self.side_clearance_region_outer_offset_m = self._positive_float_parameter(
+            "side_clearance_region_outer_offset_m",
+            DEFAULT_SIDE_CLEARANCE_REGION_OUTER_OFFSET_M,
+            minimum=0.0,
+        )
+        self.side_clearance_region_forward_m = self._positive_float_parameter(
+            "side_clearance_region_forward_m",
+            DEFAULT_SIDE_CLEARANCE_REGION_FORWARD_M,
+            minimum=0.0,
+        )
+        self.side_clearance_detection_min_points = self._positive_int_parameter(
+            "side_clearance_detection_min_points",
+            DEFAULT_SIDE_CLEARANCE_DETECTION_MIN_POINTS,
+            minimum=1,
+        )
+        self.side_clearance_sticky_timeout_sec = self._positive_float_parameter(
+            "side_clearance_sticky_timeout_sec",
+            DEFAULT_SIDE_CLEARANCE_STICKY_TIMEOUT_SEC,
+            minimum=0.0,
+        )
+        self.side_clearance_sticky_max_motion_m = self._positive_float_parameter(
+            "side_clearance_sticky_max_motion_m",
+            DEFAULT_SIDE_CLEARANCE_STICKY_MAX_MOTION_M,
             minimum=0.0,
         )
         self.show_window = self._bool_parameter(
@@ -263,6 +335,12 @@ class Lidar360RadarNode(Node):
             self._on_scan_received,
             qos_profile_sensor_data,
         )
+        self.agv_cmd_sub = self.create_subscription(
+            String,
+            self.agv_cmd_topic,
+            self._on_agv_command_received,
+            10,
+        )
         self.line_detection_pub = self.create_publisher(
             String,
             self.line_detection_topic,
@@ -295,7 +373,11 @@ class Lidar360RadarNode(Node):
         self.nearest_straight_line = self._get_nearest_straight_line_detection(
             msg
         )
+        self.side_clearance_detection = self._get_side_clearance_detection(msg)
         self._publish_line_detections(self.nearest_straight_line)
+
+    def _on_agv_command_received(self, msg: String) -> None:
+        self.agv_command_is_moving = self._agv_command_has_motion(msg.data)
 
     def _publish_line_detections(
         self,
@@ -310,6 +392,7 @@ class Lidar360RadarNode(Node):
         line_distance_m = self._line_distance(nearest_straight_line)
         line_angle_deg = self._line_angle(nearest_straight_line)
         line_side = self._line_side(nearest_straight_line)
+        side_clearance = self.side_clearance_detection
 
         msg = String()
         msg.data = (
@@ -321,7 +404,16 @@ class Lidar360RadarNode(Node):
             f"{self._format_optional_distance(line_distance_m)},"
             "bush_line_angle_deg="
             f"{self._format_optional_angle(line_angle_deg)},"
-            f"bush_line_side={line_side}"
+            f"bush_line_side={line_side},"
+            f"side_clearance_count={self._side_clearance_count(side_clearance)},"
+            "side_clearance_nearest_m="
+            f"{self._format_optional_distance(self._side_clearance_distance(side_clearance))},"
+            f"side_clearance_side={self._side_clearance_side(side_clearance)},"
+            "side_clearance_x_m="
+            f"{self._format_optional_distance(self._side_clearance_x(side_clearance))},"
+            "side_clearance_y_m="
+            f"{self._format_optional_distance(self._side_clearance_y(side_clearance))},"
+            f"side_clearance_sticky={self._format_bool(self.side_clearance_sticky_suppressed)}"
         )
         self.line_detection_pub.publish(msg)
 
@@ -469,6 +561,86 @@ class Lidar360RadarNode(Node):
 
         finish_cluster()
         return self._merge_wrapped_clusters(clusters)
+
+    def _get_side_clearance_detection(
+        self,
+        scan: LaserScan,
+    ) -> SideClearanceDetection | None:
+        candidates = []
+
+        for index, distance_m in enumerate(scan.ranges):
+            if not self._is_valid_range(scan, distance_m):
+                continue
+
+            if distance_m > self.max_display_range_m:
+                continue
+
+            angle_rad = self._to_robot_frame_angle(
+                scan.angle_min + index * scan.angle_increment
+            )
+            if self._is_inside_agv_filtered_area(angle_rad, distance_m):
+                continue
+
+            x_right_m, y_back_m = self._polar_to_robot_xy(angle_rad, distance_m)
+            side = self._side_clearance_region_side_for_point(
+                x_right_m,
+                y_back_m,
+            )
+            if side is None:
+                continue
+
+            candidates.append((side, x_right_m, y_back_m, float(distance_m)))
+
+        if len(candidates) < self.side_clearance_detection_min_points:
+            self.side_clearance_sticky_suppressed = False
+            self.side_clearance_motion_track = None
+            return None
+
+        side, x_right_m, y_back_m, distance_m = min(
+            candidates,
+            key=lambda candidate: candidate[3],
+        )
+        detection = SideClearanceDetection(
+            side=side,
+            xy_m=(x_right_m, y_back_m),
+            distance_m=distance_m,
+            point_count=len(candidates),
+        )
+
+        if self._side_clearance_detection_is_sticky(detection):
+            return None
+
+        self.side_clearance_sticky_suppressed = False
+        return detection
+
+    def _side_clearance_detection_is_sticky(
+        self,
+        detection: SideClearanceDetection,
+    ) -> bool:
+        if not self.agv_command_is_moving:
+            self.side_clearance_motion_track = None
+            self.side_clearance_sticky_suppressed = False
+            return False
+
+        now = time.monotonic()
+        track = self.side_clearance_motion_track
+        if track is None or track[0] != detection.side:
+            self.side_clearance_motion_track = (detection.side, detection.xy_m, now)
+            self.side_clearance_sticky_suppressed = False
+            return True
+
+        _, reference_xy_m, track_start_time = track
+        motion_m = self._point_distance(reference_xy_m, detection.xy_m)
+        if motion_m >= self.side_clearance_sticky_max_motion_m:
+            self.side_clearance_motion_track = (detection.side, detection.xy_m, now)
+            self.side_clearance_sticky_suppressed = False
+            return False
+
+        elapsed_sec = now - track_start_time
+        self.side_clearance_sticky_suppressed = (
+            elapsed_sec >= self.side_clearance_sticky_timeout_sec
+        )
+        return True
 
     @staticmethod
     def _merge_wrapped_clusters(
@@ -620,6 +792,7 @@ class Lidar360RadarNode(Node):
         scale_px_per_m = radius_px / self.max_display_range_m
 
         self._draw_agv_footprint(canvas, center, scale_px_per_m)
+        self._draw_side_clearance_regions(canvas, center, scale_px_per_m)
         self._draw_grid(canvas, center, radius_px)
         self._draw_fixed_reference_line(
             canvas,
@@ -769,6 +942,69 @@ class Lidar360RadarNode(Node):
             2,
             cv2.LINE_AA,
         )
+
+    def _draw_side_clearance_regions(
+        self,
+        canvas,
+        center: tuple[int, int],
+        scale_px_per_m: float,
+    ) -> None:
+        region_bounds = self._side_clearance_region_bounds_m()
+        if not region_bounds:
+            return
+
+        overlay = canvas.copy()
+        polygons = []
+        for _, x_min_m, x_max_m, y_min_m, y_max_m in region_bounds:
+            polygon = np.array(
+                [
+                    self._robot_xy_to_pixel(
+                        x_min_m,
+                        y_min_m,
+                        center,
+                        scale_px_per_m,
+                    ),
+                    self._robot_xy_to_pixel(
+                        x_max_m,
+                        y_min_m,
+                        center,
+                        scale_px_per_m,
+                    ),
+                    self._robot_xy_to_pixel(
+                        x_max_m,
+                        y_max_m,
+                        center,
+                        scale_px_per_m,
+                    ),
+                    self._robot_xy_to_pixel(
+                        x_min_m,
+                        y_max_m,
+                        center,
+                        scale_px_per_m,
+                    ),
+                ],
+                dtype=np.int32,
+            )
+            polygons.append(polygon)
+            cv2.fillPoly(overlay, [polygon], SIDE_CLEARANCE_REGION_COLOR)
+
+        cv2.addWeighted(
+            overlay,
+            SIDE_CLEARANCE_REGION_ALPHA,
+            canvas,
+            1.0 - SIDE_CLEARANCE_REGION_ALPHA,
+            0,
+            canvas,
+        )
+        for polygon in polygons:
+            cv2.polylines(
+                canvas,
+                [polygon],
+                True,
+                SIDE_CLEARANCE_REGION_COLOR,
+                2,
+                cv2.LINE_AA,
+            )
 
     def _draw_fixed_reference_line(
         self,
@@ -1136,6 +1372,63 @@ class Lidar360RadarNode(Node):
             back_edge_m,
         )
 
+    def _side_clearance_region_bounds_m(
+        self,
+    ) -> list[tuple[str, float, float, float, float]]:
+        if self.side_clearance_region_forward_m <= 0.0:
+            return []
+
+        outer_offset_m = self.side_clearance_region_outer_offset_m
+        left_edge_m, right_edge_m, front_edge_m, _ = self._agv_footprint_bounds_m()
+        front_limit_m = front_edge_m - self.side_clearance_region_forward_m
+        bounds = []
+
+        x_min_m = -outer_offset_m
+        x_max_m = left_edge_m
+        if x_max_m > x_min_m:
+            bounds.append(("left", x_min_m, x_max_m, front_limit_m, front_edge_m))
+
+        x_min_m = right_edge_m
+        x_max_m = outer_offset_m
+        if x_max_m > x_min_m:
+            bounds.append(("right", x_min_m, x_max_m, front_limit_m, front_edge_m))
+
+        return bounds
+
+    def _side_clearance_region_side_for_point(
+        self,
+        x_right_m: float,
+        y_back_m: float,
+    ) -> str | None:
+        for side, x_min_m, x_max_m, y_min_m, y_max_m in (
+            self._side_clearance_region_bounds_m()
+        ):
+            if x_min_m <= x_right_m <= x_max_m and y_min_m <= y_back_m <= y_max_m:
+                return side
+
+        return None
+
+    @staticmethod
+    def _agv_command_has_motion(command: str) -> bool:
+        command = str(command).strip().lower()
+        if command in ("", "s", "stop"):
+            return False
+
+        parts = command.split(",", maxsplit=1)
+        if len(parts) != 2:
+            return False
+
+        try:
+            right_rpm = float(parts[0].strip())
+            left_rpm = float(parts[1].strip())
+        except ValueError:
+            return False
+
+        return (
+            abs(right_rpm) > AGV_MOVING_RPM_EPSILON
+            or abs(left_rpm) > AGV_MOVING_RPM_EPSILON
+        )
+
     def _is_on_reference_vertical_line(
         self,
         angle_rad: float,
@@ -1329,6 +1622,51 @@ class Lidar360RadarNode(Node):
         return "center"
 
     @staticmethod
+    def _side_clearance_count(
+        detection: SideClearanceDetection | None,
+    ) -> int:
+        if detection is None:
+            return 0
+
+        return detection.point_count
+
+    @staticmethod
+    def _side_clearance_distance(
+        detection: SideClearanceDetection | None,
+    ) -> float | None:
+        if detection is None:
+            return None
+
+        return detection.distance_m
+
+    @staticmethod
+    def _side_clearance_side(
+        detection: SideClearanceDetection | None,
+    ) -> str:
+        if detection is None:
+            return "none"
+
+        return detection.side
+
+    @staticmethod
+    def _side_clearance_x(
+        detection: SideClearanceDetection | None,
+    ) -> float | None:
+        if detection is None:
+            return None
+
+        return detection.xy_m[0]
+
+    @staticmethod
+    def _side_clearance_y(
+        detection: SideClearanceDetection | None,
+    ) -> float | None:
+        if detection is None:
+            return None
+
+        return detection.xy_m[1]
+
+    @staticmethod
     def _format_line_distance(line: StraightLineDetection | None) -> str:
         if line is None:
             return "--"
@@ -1355,6 +1693,10 @@ class Lidar360RadarNode(Node):
             return "none"
 
         return f"{angle_deg:.2f}"
+
+    @staticmethod
+    def _format_bool(value: bool) -> str:
+        return "true" if value else "false"
 
     def _process_keyboard(self) -> None:
         key = cv2.waitKey(1) & 0xFF
