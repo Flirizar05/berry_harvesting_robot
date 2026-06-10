@@ -403,7 +403,20 @@ class Mode2VisionNode(Node):
                 self._finish_with_failure("No target detected.", annotated_image)
             return
 
-        x, y, box_width, box_height, center_u, center_v, radius_px, score, class_id = detection
+        (
+            x,
+            y,
+            box_width,
+            box_height,
+            center_u,
+            center_v,
+            radius_px,
+            score,
+            class_id,
+            confidence,
+            distance,
+            local_density,
+        ) = detection
 
         depth_m = self._depth_from_bbox(depth_image, x, y, box_width, box_height)
         if depth_m is None:
@@ -463,14 +476,19 @@ class Mode2VisionNode(Node):
             (0, 0, 255),
             3,
         )
-        cv2.putText(
+        self._draw_text_block(
             annotated_image,
-            f"Target Z={depth_m:.3f}m score={score:.2f} scale={self.depth_scale_m_per_unit:.6f}",
-            (int(x), max(0, int(y) - 8)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 0, 255),
-            2,
+            [
+                "PF vision target",
+                f"class={self._class_name(class_id)} conf={confidence:.2f} score={score:.2f}",
+                f"Z={depth_m:.3f} m  r={radius_m:.3f} m",
+                f"XYZ=({target_x_m:.3f},{target_y_m:.3f},{depth_m:.3f}) m",
+                f"uv=({center_u:.0f},{center_v:.0f}) d={distance:.2f} rho={local_density:.2f}",
+            ],
+            (12, 12),
+            text_color=(255, 255, 255),
+            background_color=(25, 25, 25),
+            prefer_above=False,
         )
 
         if self.annotated_image_publisher is not None:
@@ -491,6 +509,8 @@ class Mode2VisionNode(Node):
             f"DONE_OK u={center_u:.1f} v={center_v:.1f} Z={depth_m:.3f} "
             f"XYZ=({target_x_m:.3f},{target_y_m:.3f},{depth_m:.3f}) "
             f"r_px={radius_px:.1f} r_m={radius_m:.3f} "
+            f"class={self._class_name(class_id)} conf={confidence:.3f} "
+            f"score={score:.3f} d={distance:.3f} rho={local_density:.3f} "
             f"depth_scale={self.depth_scale_m_per_unit:.9f} "
             f"frame_id={target_msg.header.frame_id}"
         )
@@ -509,7 +529,7 @@ class Mode2VisionNode(Node):
         self,
         color_image: np.ndarray,
         annotated_image: np.ndarray,
-    ) -> Optional[Tuple[int, int, int, int, float, float, float, float, int]]:
+    ) -> Optional[Tuple[int, int, int, int, float, float, float, float, int, float, float, float]]:
         image_height, image_width = color_image.shape[:2]
 
         rgb_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
@@ -532,8 +552,7 @@ class Mode2VisionNode(Node):
         confidences = self._to_numpy(yolo_boxes.conf)
         class_ids = self._to_numpy(yolo_boxes.cls).astype(int)
 
-        best_target = None
-        best_any_detection = None
+        candidates = []
 
         for xyxy, confidence, class_id in zip(xyxy_boxes, confidences, class_ids):
             class_id = int(class_id)
@@ -556,6 +575,55 @@ class Mode2VisionNode(Node):
             center_v = float((y0_float + y1_float) / 2.0)
             radius_px = float(max(x1_float - x0_float, y1_float - y0_float) / 2.0)
 
+            image_center_u = float(image_width - 1) / 2.0
+            image_center_v = float(image_height - 1) / 2.0
+            max_center_distance = max(
+                1.0,
+                float(np.hypot(image_center_u, image_center_v)),
+            )
+            distance = float(
+                np.hypot(center_u - image_center_u, center_v - image_center_v)
+                / max_center_distance
+            )
+
+            candidates.append(
+                {
+                    "confidence": confidence,
+                    "distance": distance,
+                    "local_density": 0.0,
+                    "score": 0.0,
+                    "class_id": class_id,
+                    "x": x,
+                    "y": y,
+                    "box_width": box_width,
+                    "box_height": box_height,
+                    "center_u": center_u,
+                    "center_v": center_v,
+                    "radius_px": radius_px,
+                }
+            )
+
+        if not candidates:
+            return None
+
+        self._score_detection_candidates(candidates)
+
+        best_target = None
+        best_any_detection = None
+
+        for candidate in candidates:
+            class_id = int(candidate["class_id"])
+            confidence = float(candidate["confidence"])
+            score = float(candidate["score"])
+            distance = float(candidate["distance"])
+            local_density = float(candidate["local_density"])
+            x = int(candidate["x"])
+            y = int(candidate["y"])
+            box_width = int(candidate["box_width"])
+            box_height = int(candidate["box_height"])
+            center_u = float(candidate["center_u"])
+            center_v = float(candidate["center_v"])
+
             box_color = (
                 (255, 0, 255)
                 if class_id == self.target_class_id
@@ -568,70 +636,134 @@ class Mode2VisionNode(Node):
             y1 = min(image_height - 1, y + box_height)
 
             cv2.rectangle(annotated_image, (x0, y0), (x1, y1), box_color, 2)
-            cv2.putText(
-                annotated_image,
-                f"{self._class_name(class_id)} {confidence:.2f}",
-                (x0, max(0, y0 - 5)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 255, 255),
-                1,
-            )
 
-            if best_any_detection is None or confidence > best_any_detection[0]:
-                best_any_detection = (
-                    confidence,
-                    x,
-                    y,
-                    box_width,
-                    box_height,
-                    center_u,
-                    center_v,
-                    radius_px,
-                    class_id,
-                )
+            if best_any_detection is None or score > best_any_detection["score"]:
+                best_any_detection = candidate
 
             if class_id == self.target_class_id:
-                if best_target is None or confidence > best_target[0]:
-                    best_target = (
-                        confidence,
-                        x,
-                        y,
-                        box_width,
-                        box_height,
-                        center_u,
-                        center_v,
-                        radius_px,
-                        class_id,
-                    )
+                if best_target is None or score > best_target["score"]:
+                    best_target = candidate
 
         selected_detection = best_target if best_target is not None else best_any_detection
         if selected_detection is None:
             return None
 
-        (
-            confidence,
-            x,
-            y,
-            box_width,
-            box_height,
-            center_u,
-            center_v,
-            radius_px,
-            class_id,
-        ) = selected_detection
-
         return (
-            int(x),
-            int(y),
-            int(box_width),
-            int(box_height),
-            center_u,
-            center_v,
-            radius_px,
-            float(confidence),
-            int(class_id),
+            int(selected_detection["x"]),
+            int(selected_detection["y"]),
+            int(selected_detection["box_width"]),
+            int(selected_detection["box_height"]),
+            float(selected_detection["center_u"]),
+            float(selected_detection["center_v"]),
+            float(selected_detection["radius_px"]),
+            float(selected_detection["score"]),
+            int(selected_detection["class_id"]),
+            float(selected_detection["confidence"]),
+            float(selected_detection["distance"]),
+            float(selected_detection["local_density"]),
         )
+
+    @staticmethod
+    def _draw_text_block(
+        image: np.ndarray,
+        lines: list[str],
+        anchor: tuple[int, int],
+        text_color: tuple[int, int, int],
+        background_color: tuple[int, int, int],
+        prefer_above: bool,
+    ) -> None:
+        if not lines:
+            return
+
+        image_height, image_width = image.shape[:2]
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.42
+        thickness = 1
+        padding = 4
+        line_gap = 4
+
+        text_sizes = [
+            cv2.getTextSize(line, font, font_scale, thickness)[0]
+            for line in lines
+        ]
+        block_width = max(width for width, _ in text_sizes) + 2 * padding
+        line_height = max(height for _, height in text_sizes)
+        block_height = (
+            len(lines) * line_height
+            + max(0, len(lines) - 1) * line_gap
+            + 2 * padding
+        )
+
+        anchor_x, anchor_y = anchor
+        x0 = int(np.clip(anchor_x, 0, max(0, image_width - block_width - 1)))
+
+        if prefer_above and anchor_y - block_height - 4 >= 0:
+            y0 = anchor_y - block_height - 4
+        else:
+            y0 = anchor_y + 4
+
+        y0 = int(np.clip(y0, 0, max(0, image_height - block_height - 1)))
+        x1 = min(image_width - 1, x0 + block_width)
+        y1 = min(image_height - 1, y0 + block_height)
+
+        cv2.rectangle(image, (x0, y0), (x1, y1), background_color, -1)
+        cv2.rectangle(image, (x0, y0), (x1, y1), (255, 255, 255), 1)
+
+        baseline_y = y0 + padding + line_height
+        for line in lines:
+            cv2.putText(
+                image,
+                line,
+                (x0 + padding, baseline_y),
+                font,
+                font_scale,
+                text_color,
+                thickness,
+                cv2.LINE_AA,
+            )
+            baseline_y += line_height + line_gap
+
+    @staticmethod
+    def _score_detection_candidates(candidates: list[dict]) -> None:
+        if len(candidates) <= 1:
+            for candidate in candidates:
+                candidate["local_density"] = 0.0
+                candidate["score"] = (
+                    0.7 * float(candidate["confidence"])
+                    - 0.2 * float(candidate["distance"])
+                )
+            return
+
+        centers = np.array(
+            [
+                [float(candidate["center_u"]), float(candidate["center_v"])]
+                for candidate in candidates
+            ],
+            dtype=np.float32,
+        )
+        radii = np.array(
+            [max(1.0, float(candidate["radius_px"])) for candidate in candidates],
+            dtype=np.float32,
+        )
+
+        for index, candidate in enumerate(candidates):
+            center_distances = np.linalg.norm(centers - centers[index], axis=1)
+            local_scale = max(1.0, float(radii[index]) * 3.0)
+            neighbor_weights = np.exp(-np.square(center_distances / local_scale))
+            neighbor_weights[index] = 0.0
+            local_density = float(
+                np.clip(
+                    np.sum(neighbor_weights) / float(max(1, len(candidates) - 1)),
+                    0.0,
+                    1.0,
+                )
+            )
+            candidate["local_density"] = local_density
+            candidate["score"] = (
+                0.7 * float(candidate["confidence"])
+                - 0.2 * float(candidate["distance"])
+                - 0.1 * local_density
+            )
 
     @staticmethod
     def _to_numpy(value) -> np.ndarray:

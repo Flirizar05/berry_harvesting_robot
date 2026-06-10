@@ -20,9 +20,16 @@ CONTROL_MODE_TOPIC = "/agv/control_mode"
 CONTROL_STATUS_TOPIC = "/agv/position_control_status"
 SEARCHING_MODE_CMD_TOPIC = "/searching_mode/cmd"
 SEARCHING_MODE_STATUS_TOPIC = "/searching_mode/status"
+REFERENCE_SIDE_TOPIC = "/agv/reference_side"
+TARGET_SIDE_MODE_TOPIC = "/searching_mode/target_side"
+AUTO_HARVEST_TOPIC = "/searching_mode/auto_harvest"
 RADAR_IMAGE_TOPIC = "/agv/lidar_radar_image"
 CONTROL_MODE_MANUAL = "manual"
 CONTROL_MODE_AUTOMATIC = "automatic"
+SIDE_AUTO = "auto"
+SIDE_ANY = "any"
+SIDE_LEFT = "left"
+SIDE_RIGHT = "right"
 DRIVE_DIRECTION_FORWARD = "forward"
 FREE_MODE_COMMAND = "s"
 MAX_WHEEL_SPEED = 150
@@ -149,6 +156,33 @@ HTML_PAGE = """<!doctype html>
 
     .indicator.refining {
       background: var(--indicator-refining);
+    }
+
+    .settings-grid {
+      display: grid;
+      grid-template-columns: 80px minmax(0, 1fr) 58px minmax(0, 1fr);
+      gap: 8px;
+      align-items: center;
+      margin-top: 12px;
+    }
+
+    .settings-grid label {
+      white-space: nowrap;
+    }
+
+    .settings-grid select {
+      min-width: 0;
+      width: 100%;
+      min-height: 30px;
+      font: inherit;
+    }
+
+    .checkbox-row {
+      grid-column: 1 / -1;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      min-height: 30px;
     }
 
     .notebook {
@@ -304,6 +338,10 @@ HTML_PAGE = """<!doctype html>
         padding-left: 8px;
         padding-right: 8px;
       }
+
+      .settings-grid {
+        grid-template-columns: 72px minmax(0, 1fr);
+      }
     }
   </style>
 </head>
@@ -320,6 +358,25 @@ HTML_PAGE = """<!doctype html>
       <span class="status-label">Position</span>
       <span id="harvestingIndicator" class="indicator"></span>
       <span class="status-label">Harvesting</span>
+    </section>
+
+    <section class="settings-grid" aria-label="Harvesting settings">
+      <label for="referenceSideSelect">AGV side</label>
+      <select id="referenceSideSelect">
+        <option value="auto">auto</option>
+        <option value="left">left</option>
+        <option value="right">right</option>
+      </select>
+      <label for="targetSideSelect">Target</label>
+      <select id="targetSideSelect">
+        <option value="any">any</option>
+        <option value="left">left</option>
+        <option value="right">right</option>
+      </select>
+      <label class="checkbox-row" for="autoHarvestCheck">
+        <input id="autoHarvestCheck" type="checkbox" checked>
+        <span>Auto harvest</span>
+      </label>
     </section>
 
     <section class="notebook">
@@ -394,7 +451,10 @@ HTML_PAGE = """<!doctype html>
       speed_percent: 0,
       turn: 0,
       right_wheel: 0,
-      left_wheel: 0
+      left_wheel: 0,
+      reference_side: "auto",
+      target_side_mode: "any",
+      auto_harvest_enabled: true
     };
 
     const elements = {
@@ -412,6 +472,9 @@ HTML_PAGE = """<!doctype html>
       turnSlider: document.getElementById("turnSlider"),
       rightSlider: document.getElementById("rightSlider"),
       leftSlider: document.getElementById("leftSlider"),
+      referenceSideSelect: document.getElementById("referenceSideSelect"),
+      targetSideSelect: document.getElementById("targetSideSelect"),
+      autoHarvestCheck: document.getElementById("autoHarvestCheck"),
       speedValue: document.getElementById("speedValue"),
       turnValue: document.getElementById("turnValue"),
       rightValue: document.getElementById("rightValue"),
@@ -433,6 +496,9 @@ HTML_PAGE = """<!doctype html>
       state.turn = numberFromSlider(elements.turnSlider);
       state.right_wheel = numberFromSlider(elements.rightSlider);
       state.left_wheel = numberFromSlider(elements.leftSlider);
+      state.reference_side = elements.referenceSideSelect.value;
+      state.target_side_mode = elements.targetSideSelect.value;
+      state.auto_harvest_enabled = elements.autoHarvestCheck.checked;
 
       elements.speedValue.textContent = String(state.speed_percent);
       elements.turnValue.textContent = String(state.turn);
@@ -455,11 +521,17 @@ HTML_PAGE = """<!doctype html>
       state.turn = serverState.turn;
       state.right_wheel = serverState.right_wheel;
       state.left_wheel = serverState.left_wheel;
+      state.reference_side = serverState.reference_side;
+      state.target_side_mode = serverState.target_side_mode;
+      state.auto_harvest_enabled = Boolean(serverState.auto_harvest_enabled);
 
       elements.speedSlider.value = String(state.speed_percent);
       elements.turnSlider.value = String(state.turn);
       elements.rightSlider.value = String(state.right_wheel);
       elements.leftSlider.value = String(state.left_wheel);
+      elements.referenceSideSelect.value = state.reference_side;
+      elements.targetSideSelect.value = state.target_side_mode;
+      elements.autoHarvestCheck.checked = state.auto_harvest_enabled;
       updateLocalSliderState();
       renderTabs();
 
@@ -505,7 +577,10 @@ HTML_PAGE = """<!doctype html>
         speed_percent: state.speed_percent,
         turn: state.turn,
         right_wheel: state.right_wheel,
-        left_wheel: state.left_wheel
+        left_wheel: state.left_wheel,
+        reference_side: state.reference_side,
+        target_side_mode: state.target_side_mode,
+        auto_harvest_enabled: state.auto_harvest_enabled
       };
     }
 
@@ -572,7 +647,10 @@ HTML_PAGE = """<!doctype html>
         speed_percent: 0,
         turn: 0,
         right_wheel: 0,
-        left_wheel: 0
+        left_wheel: 0,
+        reference_side: state.reference_side,
+        target_side_mode: state.target_side_mode,
+        auto_harvest_enabled: state.auto_harvest_enabled
       };
       const data = new Blob(
         [JSON.stringify(stopPayload)],
@@ -617,6 +695,9 @@ HTML_PAGE = """<!doctype html>
     elements.turnSlider.addEventListener("input", queueUpdate);
     elements.rightSlider.addEventListener("input", queueUpdate);
     elements.leftSlider.addEventListener("input", queueUpdate);
+    elements.referenceSideSelect.addEventListener("change", queueUpdate);
+    elements.targetSideSelect.addEventListener("change", queueUpdate);
+    elements.autoHarvestCheck.addEventListener("change", queueUpdate);
     window.addEventListener("pagehide", stopWithBeacon);
 
     renderTabs();
@@ -661,6 +742,9 @@ class AgvWebControlNode(Node):
         self.safety_stop_active = False
         self.free_stop_active = False
         self.searching_mode_active = False
+        self.reference_side = SIDE_AUTO
+        self.target_side_mode = SIDE_ANY
+        self.auto_harvest_enabled = True
         self.is_shutting_down = False
         self.lock = threading.RLock()
 
@@ -705,6 +789,12 @@ class AgvWebControlNode(Node):
             "searching_mode_status_topic",
             SEARCHING_MODE_STATUS_TOPIC,
         )
+        self.declare_parameter("reference_side_topic", REFERENCE_SIDE_TOPIC)
+        self.declare_parameter("target_side_mode_topic", TARGET_SIDE_MODE_TOPIC)
+        self.declare_parameter("auto_harvest_topic", AUTO_HARVEST_TOPIC)
+        self.declare_parameter("reference_side", SIDE_AUTO)
+        self.declare_parameter("target_side_mode", SIDE_ANY)
+        self.declare_parameter("auto_harvest_enabled", True)
         self.declare_parameter("radar_image_topic", RADAR_IMAGE_TOPIC)
         self.declare_parameter("invert_turn_direction", INVERT_TURN_DIRECTION)
         self.declare_parameter("web_host", WEB_HOST)
@@ -740,6 +830,35 @@ class AgvWebControlNode(Node):
         ).strip()
         if not self.searching_mode_status_topic:
             self.searching_mode_status_topic = SEARCHING_MODE_STATUS_TOPIC
+
+        self.reference_side_topic = str(
+            self.get_parameter("reference_side_topic").value
+        ).strip()
+        if not self.reference_side_topic:
+            self.reference_side_topic = REFERENCE_SIDE_TOPIC
+
+        self.target_side_mode_topic = str(
+            self.get_parameter("target_side_mode_topic").value
+        ).strip()
+        if not self.target_side_mode_topic:
+            self.target_side_mode_topic = TARGET_SIDE_MODE_TOPIC
+
+        self.auto_harvest_topic = str(
+            self.get_parameter("auto_harvest_topic").value
+        ).strip()
+        if not self.auto_harvest_topic:
+            self.auto_harvest_topic = AUTO_HARVEST_TOPIC
+
+        self.reference_side = self._normalize_reference_side(
+            self.get_parameter("reference_side").value
+        )
+        self.target_side_mode = self._normalize_target_side_mode(
+            self.get_parameter("target_side_mode").value
+        )
+        self.auto_harvest_enabled = self._parse_bool_value(
+            self.get_parameter("auto_harvest_enabled").value,
+            default_value=True,
+        )
 
         self.radar_image_topic = str(
             self.get_parameter("radar_image_topic").value
@@ -824,6 +943,21 @@ class AgvWebControlNode(Node):
         self.pub_searching_mode_cmd = self.create_publisher(
             String,
             self.searching_mode_cmd_topic,
+            10,
+        )
+        self.pub_reference_side = self.create_publisher(
+            String,
+            self.reference_side_topic,
+            10,
+        )
+        self.pub_target_side_mode = self.create_publisher(
+            String,
+            self.target_side_mode_topic,
+            10,
+        )
+        self.pub_auto_harvest = self.create_publisher(
+            String,
+            self.auto_harvest_topic,
             10,
         )
         self.control_status_sub = self.create_subscription(
@@ -1085,6 +1219,16 @@ class AgvWebControlNode(Node):
             0,
             MAX_WHEEL_SPEED,
         )
+        self.reference_side = self._normalize_reference_side(
+            payload.get("reference_side", self.reference_side)
+        )
+        self.target_side_mode = self._normalize_target_side_mode(
+            payload.get("target_side_mode", self.target_side_mode)
+        )
+        self.auto_harvest_enabled = self._parse_bool_value(
+            payload.get("auto_harvest_enabled", self.auto_harvest_enabled),
+            default_value=self.auto_harvest_enabled,
+        )
         self.free_stop_active = False
 
     @staticmethod
@@ -1193,6 +1337,9 @@ class AgvWebControlNode(Node):
             "turn": self.turn,
             "right_wheel": self.right_wheel,
             "left_wheel": self.left_wheel,
+            "reference_side": self.reference_side,
+            "target_side_mode": self.target_side_mode,
+            "auto_harvest_enabled": self.auto_harvest_enabled,
             "orientation_control_active": self.orientation_control_active,
             "position_control_active": self.position_control_active,
             "harvesting_active": self.harvesting_active,
@@ -1227,6 +1374,13 @@ class AgvWebControlNode(Node):
             f"Cobot button -> {self.searching_mode_cmd_topic} {command}"
         )
 
+    def _publish_stage_config_locked(self) -> None:
+        self.pub_reference_side.publish(String(data=self.reference_side))
+        self.pub_target_side_mode.publish(String(data=self.target_side_mode))
+        self.pub_auto_harvest.publish(
+            String(data=self._format_bool(self.auto_harvest_enabled))
+        )
+
     def _toggle_searching_mode_locked(self) -> None:
         command = "STOP" if self.searching_mode_active else "START"
         self._publish_searching_mode_command_locked(command)
@@ -1249,6 +1403,7 @@ class AgvWebControlNode(Node):
                 self._stop_for_browser_timeout_locked()
                 return
 
+            self._publish_stage_config_locked()
             self._publish_control_mode_locked()
             if self.control_mode == CONTROL_MODE_MANUAL:
                 if self.free_stop_active:
@@ -1357,6 +1512,40 @@ class AgvWebControlNode(Node):
         self.orientation_control_active = False
         self.automatic_right_rpm = 0
         self.automatic_left_rpm = 0
+
+    @staticmethod
+    def _normalize_reference_side(value) -> str:
+        side = str(value).strip().lower()
+        if side in (SIDE_AUTO, SIDE_LEFT, SIDE_RIGHT):
+            return side
+
+        return SIDE_AUTO
+
+    @staticmethod
+    def _normalize_target_side_mode(value) -> str:
+        side = str(value).strip().lower()
+        if side in (SIDE_ANY, SIDE_LEFT, SIDE_RIGHT):
+            return side
+
+        return SIDE_ANY
+
+    @staticmethod
+    def _parse_bool_value(value, default_value: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+
+        normalized_value = str(value).strip().lower()
+        if normalized_value in ("true", "1", "yes", "on"):
+            return True
+
+        if normalized_value in ("false", "0", "no", "off"):
+            return False
+
+        return bool(default_value)
+
+    @staticmethod
+    def _format_bool(value: bool) -> str:
+        return "true" if value else "false"
 
     @staticmethod
     def _parse_key_value_message(data: str) -> dict[str, str]:

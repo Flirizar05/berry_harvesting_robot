@@ -10,8 +10,12 @@ DEFAULT_COMMAND_TOPIC = "/agv/rpm_cmd"
 DEFAULT_LINE_DETECTION_TOPIC = "/agv/line_detections"
 DEFAULT_CONTROL_MODE_TOPIC = "/agv/control_mode"
 DEFAULT_CONTROL_STATUS_TOPIC = "/agv/position_control_status"
+DEFAULT_REFERENCE_SIDE_TOPIC = "/agv/reference_side"
 CONTROL_MODE_MANUAL = "manual"
 CONTROL_MODE_AUTOMATIC = "automatic"
+REFERENCE_SIDE_AUTO = "auto"
+REFERENCE_SIDE_LEFT = "left"
+REFERENCE_SIDE_RIGHT = "right"
 DEFAULT_CONTROL_PERIOD_SEC = 0.10
 DEFAULT_LINE_DETECTION_TIMEOUT_SEC = 0.50
 DEFAULT_TARGET_BUSH_LINE_ANGLE_DEG = 0.0
@@ -36,6 +40,11 @@ class AgvPositionControlNode(Node):
         self.bush_line_distance_m: float | None = None
         self.bush_line_angle_deg: float | None = None
         self.bush_line_side: str | None = None
+        self.left_bush_line_distance_m: float | None = None
+        self.left_bush_line_angle_deg: float | None = None
+        self.right_bush_line_distance_m: float | None = None
+        self.right_bush_line_angle_deg: float | None = None
+        self.reference_side = REFERENCE_SIDE_AUTO
         self.last_line_detection_time = None
         self.line_detections_are_fresh = False
         self.control_mode = CONTROL_MODE_MANUAL
@@ -88,6 +97,11 @@ class AgvPositionControlNode(Node):
             "control_status_topic",
             DEFAULT_CONTROL_STATUS_TOPIC,
         )
+        self.declare_parameter(
+            "reference_side_topic",
+            DEFAULT_REFERENCE_SIDE_TOPIC,
+        )
+        self.declare_parameter("reference_side", REFERENCE_SIDE_AUTO)
         self.declare_parameter("control_period_sec", DEFAULT_CONTROL_PERIOD_SEC)
         self.declare_parameter(
             "line_detection_timeout_sec",
@@ -134,6 +148,16 @@ class AgvPositionControlNode(Node):
         ).strip()
         if not self.control_status_topic:
             self.control_status_topic = DEFAULT_CONTROL_STATUS_TOPIC
+
+        self.reference_side_topic = str(
+            self.get_parameter("reference_side_topic").value
+        ).strip()
+        if not self.reference_side_topic:
+            self.reference_side_topic = DEFAULT_REFERENCE_SIDE_TOPIC
+
+        self.reference_side = self._normalize_reference_side(
+            self.get_parameter("reference_side").value,
+        )
 
         self.control_period_sec = self._positive_float_parameter(
             "control_period_sec",
@@ -219,6 +243,12 @@ class AgvPositionControlNode(Node):
             self._on_control_mode_received,
             10,
         )
+        self.reference_side_sub = self.create_subscription(
+            String,
+            self.reference_side_topic,
+            self._on_reference_side_received,
+            10,
+        )
         self.control_timer = self.create_timer(
             self.control_period_sec,
             self._on_control_timer,
@@ -246,6 +276,18 @@ class AgvPositionControlNode(Node):
             self.bush_line_side = self._parse_optional_side(
                 values.get("bush_line_side")
             )
+            self.left_bush_line_distance_m = self._parse_optional_distance(
+                values.get("left_bush_line_distance_m")
+            )
+            self.left_bush_line_angle_deg = self._parse_optional_float(
+                values.get("left_bush_line_angle_deg")
+            )
+            self.right_bush_line_distance_m = self._parse_optional_distance(
+                values.get("right_bush_line_distance_m")
+            )
+            self.right_bush_line_angle_deg = self._parse_optional_float(
+                values.get("right_bush_line_angle_deg")
+            )
             self.last_line_detection_time = self.get_clock().now()
             self.line_detections_are_fresh = True
 
@@ -269,6 +311,16 @@ class AgvPositionControlNode(Node):
         self.get_logger().info(f"Control mode changed to {self.control_mode}")
         if self.control_mode == CONTROL_MODE_MANUAL:
             self._publish_stop_command()
+
+    def _on_reference_side_received(self, msg: String) -> None:
+        reference_side = self._normalize_reference_side(msg.data)
+        if reference_side == self.reference_side:
+            return
+
+        self.reference_side = reference_side
+        self.get_logger().info(
+            f"AGV reference side changed to {self.reference_side}"
+        )
 
     def _on_control_timer(self) -> None:
         if self.control_mode != CONTROL_MODE_AUTOMATIC:
@@ -305,6 +357,7 @@ class AgvPositionControlNode(Node):
             "bush_line_angle="
             f"{self._format_optional_angle(self.bush_line_angle_deg)} deg "
             f"bush_line_side={self.bush_line_side or 'none'} "
+            f"reference_side={self.reference_side} "
             f"control_mode={self.control_mode} "
             f"rpm_cmd={right_rpm},{left_rpm}"
         )
@@ -329,6 +382,10 @@ class AgvPositionControlNode(Node):
         self.bush_line_distance_m = None
         self.bush_line_angle_deg = None
         self.bush_line_side = None
+        self.left_bush_line_distance_m = None
+        self.left_bush_line_angle_deg = None
+        self.right_bush_line_distance_m = None
+        self.right_bush_line_angle_deg = None
         self.line_detections_are_fresh = False
         self.get_logger().warn("Radar line detections timed out")
 
@@ -371,6 +428,14 @@ class AgvPositionControlNode(Node):
         return None
 
     @staticmethod
+    def _normalize_reference_side(value) -> str:
+        side = str(value).strip().lower()
+        if side in (REFERENCE_SIDE_AUTO, REFERENCE_SIDE_LEFT, REFERENCE_SIDE_RIGHT):
+            return side
+
+        return REFERENCE_SIDE_AUTO
+
+    @staticmethod
     def _format_optional_distance(distance_m: float | None) -> str:
         if distance_m is None:
             return "none"
@@ -398,7 +463,9 @@ class AgvPositionControlNode(Node):
             f"orientation_active={self._format_bool(self.orientation_control_active)},"
             f"position_active={self._format_bool(self.position_control_active)},"
             f"right_rpm={right_rpm},"
-            f"left_rpm={left_rpm}"
+            f"left_rpm={left_rpm},"
+            f"reference_side={self.reference_side},"
+            f"active_reference_side={self._active_reference_side() or 'none'}"
         )
         self.control_status_pub.publish(msg)
 
@@ -407,19 +474,24 @@ class AgvPositionControlNode(Node):
         self.position_control_active = False
 
     def control_loop(self) -> tuple[int, int] | None:
-        if self.bush_line_angle_deg is None:
+        active_reference_side = self._active_reference_side()
+        if active_reference_side is None:
+            self._clear_control_activity()
+            return None
+
+        theta_cur_deg = self._angle_for_side(active_reference_side)
+        if theta_cur_deg is None:
             self._clear_control_activity()
             return None
 
         theta_ref_deg = self.target_bush_line_angle_deg
-        theta_cur_deg = self.bush_line_angle_deg
         angle_error_deg = theta_ref_deg - theta_cur_deg
 
         angle_correction_rpm = self.angle_gain_rpm_per_deg * angle_error_deg
         (
             distance_correction_rpm,
             self.position_control_active,
-        ) = self._distance_correction_rpm()
+        ) = self._distance_correction_rpm(active_reference_side)
         self.orientation_control_active = True
 
         base_rpm = BASE_RPM
@@ -430,8 +502,10 @@ class AgvPositionControlNode(Node):
 
         return self._limit_wheel_rpm(right_rpm), self._limit_wheel_rpm(left_rpm)
 
-    def _distance_correction_rpm(self) -> tuple[float, bool]:
-        horizontal_distance_m = self._horizontal_detection_for_bush_line_side()
+    def _distance_correction_rpm(self, active_reference_side: str) -> tuple[float, bool]:
+        horizontal_distance_m = self._horizontal_detection_for_side(
+            active_reference_side
+        )
         if horizontal_distance_m is None:
             return 0.0, False
 
@@ -440,12 +514,41 @@ class AgvPositionControlNode(Node):
         )
         return self.distance_gain_rpm_per_m * distance_error_m, True
 
-    def _horizontal_detection_for_bush_line_side(self) -> float | None:
-        if self.bush_line_side == "left":
+    def _active_reference_side(self) -> str | None:
+        if self.reference_side == REFERENCE_SIDE_LEFT:
+            return REFERENCE_SIDE_LEFT
+
+        if self.reference_side == REFERENCE_SIDE_RIGHT:
+            return REFERENCE_SIDE_RIGHT
+
+        return self.bush_line_side
+
+    def _horizontal_detection_for_side(self, side: str) -> float | None:
+        if side == REFERENCE_SIDE_LEFT:
             return self.left_line_detection_m
 
-        if self.bush_line_side == "right":
+        if side == REFERENCE_SIDE_RIGHT:
             return self.right_line_detection_m
+
+        return None
+
+    def _angle_for_side(self, side: str) -> float | None:
+        if self.reference_side == REFERENCE_SIDE_AUTO:
+            return self.bush_line_angle_deg
+
+        if side == REFERENCE_SIDE_LEFT:
+            if self.left_bush_line_angle_deg is not None:
+                return self.left_bush_line_angle_deg
+            if self.bush_line_side == REFERENCE_SIDE_LEFT:
+                return self.bush_line_angle_deg
+            return None
+
+        if side == REFERENCE_SIDE_RIGHT:
+            if self.right_bush_line_angle_deg is not None:
+                return self.right_bush_line_angle_deg
+            if self.bush_line_side == REFERENCE_SIDE_RIGHT:
+                return self.bush_line_angle_deg
+            return None
 
         return None
 

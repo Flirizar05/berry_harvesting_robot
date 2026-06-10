@@ -13,7 +13,9 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 from harvesting_robot_agv.agv_position_control_node import (
+    DEFAULT_REFERENCE_SIDE_TOPIC,
     DEFAULT_TARGET_HORIZONTAL_LINE_DISTANCE_M,
+    REFERENCE_SIDE_AUTO,
 )
 
 
@@ -32,6 +34,12 @@ def generate_launch_description() -> LaunchDescription:
     target_horizontal_line_distance_m = LaunchConfiguration(
         "target_horizontal_line_distance_m"
     )
+    reference_side = LaunchConfiguration("reference_side")
+    reference_side_topic = LaunchConfiguration("reference_side_topic")
+    target_side_mode = LaunchConfiguration("target_side_mode")
+    target_side_mode_topic = LaunchConfiguration("target_side_mode_topic")
+    auto_harvest_enabled = LaunchConfiguration("auto_harvest_enabled")
+    auto_harvest_topic = LaunchConfiguration("auto_harvest_topic")
     side_clearance_region_outer_offset_m = LaunchConfiguration(
         "side_clearance_region_outer_offset_m"
     )
@@ -93,6 +101,45 @@ def generate_launch_description() -> LaunchDescription:
                 ),
             ),
             DeclareLaunchArgument(
+                "reference_side",
+                default_value=REFERENCE_SIDE_AUTO,
+                description=(
+                    "AGV bush-line reference side for orientation/position "
+                    "control: auto, left, or right."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "reference_side_topic",
+                default_value=DEFAULT_REFERENCE_SIDE_TOPIC,
+                description="Topic used to update the AGV reference side.",
+            ),
+            DeclareLaunchArgument(
+                "target_side_mode",
+                default_value="any",
+                description=(
+                    "Cobot target side accepted by searching mode: any, left, "
+                    "or right."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "target_side_mode_topic",
+                default_value="/searching_mode/target_side",
+                description="Topic used to update the cobot target side mode.",
+            ),
+            DeclareLaunchArgument(
+                "auto_harvest_enabled",
+                default_value="true",
+                description=(
+                    "Enable automatic master_node START after target "
+                    "confirmation."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "auto_harvest_topic",
+                default_value="/searching_mode/auto_harvest",
+                description="Topic used to enable or disable auto harvesting.",
+            ),
+            DeclareLaunchArgument(
                 "side_clearance_region_outer_offset_m",
                 default_value="1.0",
                 description=(
@@ -102,7 +149,7 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "side_clearance_region_forward_m",
-                default_value="1.0",
+                default_value="1.4",
                 description=(
                     "Forward length of the side harvesting regions from the "
                     "AGV front line, in meters."
@@ -191,6 +238,8 @@ def generate_launch_description() -> LaunchDescription:
                             target_horizontal_line_distance_m,
                             value_type=float,
                         ),
+                        "reference_side": reference_side,
+                        "reference_side_topic": reference_side_topic,
                     }
                 ],
             ),
@@ -211,6 +260,15 @@ def generate_launch_description() -> LaunchDescription:
                         "web_port": ParameterValue(web_port, value_type=int),
                         "radar_image_topic": "/agv/lidar_radar_image",
                         "line_detection_topic": "/agv/line_detections",
+                        "reference_side": reference_side,
+                        "reference_side_topic": reference_side_topic,
+                        "target_side_mode": target_side_mode,
+                        "target_side_mode_topic": target_side_mode_topic,
+                        "auto_harvest_enabled": ParameterValue(
+                            auto_harvest_enabled,
+                            value_type=bool,
+                        ),
+                        "auto_harvest_topic": auto_harvest_topic,
                     }
                 ],
             ),

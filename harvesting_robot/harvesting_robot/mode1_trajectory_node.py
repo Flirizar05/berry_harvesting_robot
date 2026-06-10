@@ -14,7 +14,7 @@ from nav_msgs.msg import Path
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Bool, Float32, String
 from visualization_msgs.msg import Marker
 
 
@@ -273,6 +273,8 @@ class Mode1TrajectoryNode(Node):
         self.projected_sphere_radius = None
         self.goal_point = None
         self.target_point = None
+        self.final_approach_active = False
+        self.finish_on_projected_sphere = True
 
         self.last_path_marker_pub_time = 0.0
 
@@ -304,6 +306,7 @@ class Mode1TrajectoryNode(Node):
         self.declare_parameter("waypoint_topic", "/trajectory/waypoint")
         self.declare_parameter("path_topic", "/trajectory/path")
         self.declare_parameter("tcp_target_dist_topic", "/trajectory/tcp_target_dist")
+        self.declare_parameter("final_approach_topic", "/trajectory/final_approach")
 
         self.declare_parameter("urdf_path", default_urdf_path)
         self.declare_parameter(
@@ -340,6 +343,9 @@ class Mode1TrajectoryNode(Node):
         self.declare_parameter("waypoint_tol_m", 0.05)
         self.declare_parameter("sphere_touch_tol_m", 0.05)
         self.declare_parameter("goal_tol_m", 0.05)
+        self.declare_parameter("final_approach_tol_m", 0.005)
+        self.declare_parameter("final_approach_direct_target", True)
+        self.declare_parameter("final_approach_goal_tol_m", 0.01)
 
         self.declare_parameter("loop_rate_hz", 50.0)
         self.declare_parameter("path_pub_period", 1.0)
@@ -357,6 +363,9 @@ class Mode1TrajectoryNode(Node):
         self.path_topic = str(self.get_parameter("path_topic").value)
         self.tcp_target_distance_topic = str(
             self.get_parameter("tcp_target_dist_topic").value
+        )
+        self.final_approach_topic = str(
+            self.get_parameter("final_approach_topic").value
         )
 
         self.urdf_path = str(self.get_parameter("urdf_path").value)
@@ -390,6 +399,15 @@ class Mode1TrajectoryNode(Node):
             self.get_parameter("sphere_touch_tol_m").value
         )
         self.goal_tol_m = float(self.get_parameter("goal_tol_m").value)
+        self.final_approach_tol_m = float(
+            self.get_parameter("final_approach_tol_m").value
+        )
+        self.final_approach_direct_target = bool(
+            self.get_parameter("final_approach_direct_target").value
+        )
+        self.final_approach_goal_tol_m = float(
+            self.get_parameter("final_approach_goal_tol_m").value
+        )
 
         self.loop_rate_hz = float(self.get_parameter("loop_rate_hz").value)
         self.path_pub_period_sec = float(
@@ -454,6 +472,11 @@ class Mode1TrajectoryNode(Node):
             self.tcp_target_distance_topic,
             10,
         )
+        self.final_approach_publisher = self.create_publisher(
+            Bool,
+            self.final_approach_topic,
+            10,
+        )
 
     def _on_joint_state(self, msg: JointState) -> None:
         joint_map = {name: position for name, position in zip(msg.name, msg.position)}
@@ -477,6 +500,8 @@ class Mode1TrajectoryNode(Node):
         if command not in ("PLAN", "START"):
             if command in ("STOP", "ABORT"):
                 self.is_active = False
+                self.final_approach_active = False
+                self._publish_final_approach_state()
                 self.status_publisher.publish(String(data="DONE_FAIL"))
                 self.status_publisher.publish(String(data="IDLE"))
             return
@@ -553,11 +578,21 @@ class Mode1TrajectoryNode(Node):
             else raw_radius_m
         )
 
-        projected_sphere_center = tcp_start + self.projection_distance_m * direction_unit
-        if self.projection_distance_m > direction_norm:
-            projected_sphere_center = target_point.copy()
+        final_approach_active = (
+            direction_norm <= self.projection_distance_m + self.final_approach_tol_m
+        )
 
-        goal_point = projected_sphere_center - used_radius_m * direction_unit
+        if final_approach_active:
+            projected_sphere_center = target_point.copy()
+        else:
+            projected_sphere_center = tcp_start + self.projection_distance_m * direction_unit
+
+        finish_on_projected_sphere = True
+        if final_approach_active and self.final_approach_direct_target:
+            goal_point = target_point.copy()
+            finish_on_projected_sphere = False
+        else:
+            goal_point = projected_sphere_center - used_radius_m * direction_unit
 
         self.path_xyz = build_sigmoid_path(
             tcp_start,
@@ -572,16 +607,27 @@ class Mode1TrajectoryNode(Node):
         self.projected_sphere_radius = used_radius_m
         self.goal_point = goal_point
         self.target_point = target_point
+        self.final_approach_active = final_approach_active
+        self.finish_on_projected_sphere = finish_on_projected_sphere
+        self._publish_final_approach_state()
 
         self.get_logger().info(
             f"PLAN ok: dist={direction_norm:.3f} m, "
             f"projection={self.projection_distance_m:.3f} m, "
             f"radius_raw={raw_radius_m:.3f} m, "
             f"radius_used={used_radius_m:.3f} m, "
-            f"clamp_radius={self.clamp_radius}"
+            f"clamp_radius={self.clamp_radius}, "
+            f"final_approach={self.final_approach_active}, "
+            f"direct_target={self.final_approach_active and self.final_approach_direct_target}, "
+            f"T={self.trajectory_total_time:.2f} s"
         )
 
         return True, "ok"
+
+    def _publish_final_approach_state(self) -> None:
+        self.final_approach_publisher.publish(
+            Bool(data=bool(self.final_approach_active))
+        )
 
     def _finish_success(self, reason: str) -> None:
         self.is_active = False
@@ -613,7 +659,8 @@ class Mode1TrajectoryNode(Node):
             return
 
         if (
-            self.projected_sphere_center is not None
+            self.finish_on_projected_sphere
+            and self.projected_sphere_center is not None
             and self.projected_sphere_radius is not None
         ):
             distance_to_sphere_center = float(
@@ -648,7 +695,15 @@ class Mode1TrajectoryNode(Node):
         else:
             if self.goal_point is not None:
                 distance_to_goal = float(np.linalg.norm(tcp_position - self.goal_point))
-                if distance_to_goal <= self.goal_tol_m:
+                goal_tolerance_m = (
+                    self.final_approach_goal_tol_m
+                    if (
+                        self.final_approach_active
+                        and self.final_approach_direct_target
+                    )
+                    else self.goal_tol_m
+                )
+                if distance_to_goal <= goal_tolerance_m:
                     self._finish_success("Reached final waypoint.")
                     return
 

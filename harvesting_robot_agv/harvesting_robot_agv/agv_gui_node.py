@@ -14,8 +14,15 @@ CONTROL_MODE_TOPIC = "/agv/control_mode"
 CONTROL_STATUS_TOPIC = "/agv/position_control_status"
 SEARCHING_MODE_CMD_TOPIC = "/searching_mode/cmd"
 SEARCHING_MODE_STATUS_TOPIC = "/searching_mode/status"
+REFERENCE_SIDE_TOPIC = "/agv/reference_side"
+TARGET_SIDE_MODE_TOPIC = "/searching_mode/target_side"
+AUTO_HARVEST_TOPIC = "/searching_mode/auto_harvest"
 CONTROL_MODE_MANUAL = "manual"
 CONTROL_MODE_AUTOMATIC = "automatic"
+SIDE_AUTO = "auto"
+SIDE_ANY = "any"
+SIDE_LEFT = "left"
+SIDE_RIGHT = "right"
 FREE_MODE_COMMAND = "s"
 MAX_WHEEL_SPEED = 150
 MIN_FORWARD_SPEED = 50
@@ -42,6 +49,9 @@ class AgvGuiNode(Node):
         self.automatic_left_rpm = 0
         self.free_stop_active = False
         self.searching_mode_active = False
+        self.reference_side = SIDE_AUTO
+        self.target_side_mode = SIDE_ANY
+        self.auto_harvest_enabled = True
         self._declare_parameters()
         self._load_parameters()
         self._create_ros_interfaces()
@@ -77,6 +87,12 @@ class AgvGuiNode(Node):
             "searching_mode_status_topic",
             SEARCHING_MODE_STATUS_TOPIC,
         )
+        self.declare_parameter("reference_side_topic", REFERENCE_SIDE_TOPIC)
+        self.declare_parameter("target_side_mode_topic", TARGET_SIDE_MODE_TOPIC)
+        self.declare_parameter("auto_harvest_topic", AUTO_HARVEST_TOPIC)
+        self.declare_parameter("reference_side", SIDE_AUTO)
+        self.declare_parameter("target_side_mode", SIDE_ANY)
+        self.declare_parameter("auto_harvest_enabled", True)
         self.declare_parameter("invert_turn_direction", INVERT_TURN_DIRECTION)
 
     def _load_parameters(self) -> None:
@@ -108,6 +124,35 @@ class AgvGuiNode(Node):
         if not self.searching_mode_status_topic:
             self.searching_mode_status_topic = SEARCHING_MODE_STATUS_TOPIC
 
+        self.reference_side_topic = str(
+            self.get_parameter("reference_side_topic").value
+        ).strip()
+        if not self.reference_side_topic:
+            self.reference_side_topic = REFERENCE_SIDE_TOPIC
+
+        self.target_side_mode_topic = str(
+            self.get_parameter("target_side_mode_topic").value
+        ).strip()
+        if not self.target_side_mode_topic:
+            self.target_side_mode_topic = TARGET_SIDE_MODE_TOPIC
+
+        self.auto_harvest_topic = str(
+            self.get_parameter("auto_harvest_topic").value
+        ).strip()
+        if not self.auto_harvest_topic:
+            self.auto_harvest_topic = AUTO_HARVEST_TOPIC
+
+        self.reference_side = self._normalize_reference_side(
+            self.get_parameter("reference_side").value
+        )
+        self.target_side_mode = self._normalize_target_side_mode(
+            self.get_parameter("target_side_mode").value
+        )
+        self.auto_harvest_enabled = self._parse_bool_value(
+            self.get_parameter("auto_harvest_enabled").value,
+            default_value=True,
+        )
+
         self.invert_turn_direction = bool(
             self.get_parameter("invert_turn_direction").value
         )
@@ -122,6 +167,21 @@ class AgvGuiNode(Node):
         self.pub_searching_mode_cmd = self.create_publisher(
             String,
             self.searching_mode_cmd_topic,
+            10,
+        )
+        self.pub_reference_side = self.create_publisher(
+            String,
+            self.reference_side_topic,
+            10,
+        )
+        self.pub_target_side_mode = self.create_publisher(
+            String,
+            self.target_side_mode_topic,
+            10,
+        )
+        self.pub_auto_harvest = self.create_publisher(
+            String,
+            self.auto_harvest_topic,
             10,
         )
         self.control_status_sub = self.create_subscription(
@@ -149,6 +209,9 @@ class AgvGuiNode(Node):
         self.left_var = tk.IntVar(value=0)
         self.mode_var = tk.StringVar(value="Mode: MANUAL")
         self.command_var = tk.StringVar(value="Command: 0,0   right=0, left=0")
+        self.reference_side_var = tk.StringVar(value=self.reference_side)
+        self.target_side_var = tk.StringVar(value=self.target_side_mode)
+        self.auto_harvest_var = tk.BooleanVar(value=self.auto_harvest_enabled)
 
     def _create_widgets(self) -> None:
         main_frame = ttk.Frame(self.root, padding=12)
@@ -192,13 +255,70 @@ class AgvGuiNode(Node):
             column=4,
         )
 
+        config_frame = ttk.Frame(main_frame)
+        config_frame.grid(row=2, column=0, columnspan=2, pady=(12, 0), sticky="ew")
+        config_frame.columnconfigure(1, weight=1)
+        config_frame.columnconfigure(3, weight=1)
+
+        ttk.Label(config_frame, text="AGV side").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=(0, 6),
+        )
+        self.reference_side_combo = ttk.Combobox(
+            config_frame,
+            textvariable=self.reference_side_var,
+            values=(SIDE_AUTO, SIDE_LEFT, SIDE_RIGHT),
+            state="readonly",
+            width=8,
+        )
+        self.reference_side_combo.grid(row=0, column=1, sticky="ew", padx=(0, 12))
+        self.reference_side_combo.bind(
+            "<<ComboboxSelected>>",
+            self._on_config_value_changed,
+        )
+
+        ttk.Label(config_frame, text="Target").grid(
+            row=0,
+            column=2,
+            sticky="w",
+            padx=(0, 6),
+        )
+        self.target_side_combo = ttk.Combobox(
+            config_frame,
+            textvariable=self.target_side_var,
+            values=(SIDE_ANY, SIDE_LEFT, SIDE_RIGHT),
+            state="readonly",
+            width=8,
+        )
+        self.target_side_combo.grid(row=0, column=3, sticky="ew")
+        self.target_side_combo.bind(
+            "<<ComboboxSelected>>",
+            self._on_config_value_changed,
+        )
+
+        self.auto_harvest_check = ttk.Checkbutton(
+            config_frame,
+            text="Auto harvest",
+            variable=self.auto_harvest_var,
+            command=self._on_config_value_changed,
+        )
+        self.auto_harvest_check.grid(
+            row=1,
+            column=0,
+            columnspan=4,
+            pady=(8, 0),
+            sticky="w",
+        )
+
         self.notebook = ttk.Notebook(main_frame)
         self.speed_turn_frame = ttk.Frame(self.notebook, padding=12)
         self.independent_frame = ttk.Frame(self.notebook, padding=12)
 
         self.notebook.add(self.speed_turn_frame, text="Speed + Turn")
         self.notebook.add(self.independent_frame, text="Independent wheels")
-        self.notebook.grid(row=2, column=0, columnspan=2, pady=(12, 0), sticky="ew")
+        self.notebook.grid(row=3, column=0, columnspan=2, pady=(12, 0), sticky="ew")
         self.notebook.bind("<<NotebookTabChanged>>", self._on_gui_value_changed)
 
         self._create_labeled_slider(
@@ -239,7 +359,7 @@ class AgvGuiNode(Node):
             textvariable=self.command_var,
             font=("TkDefaultFont", 11, "bold"),
         )
-        self.command_label.grid(row=3, column=0, columnspan=2, pady=(12, 8), sticky="w")
+        self.command_label.grid(row=4, column=0, columnspan=2, pady=(12, 8), sticky="w")
 
         self.stop_button = tk.Button(
             main_frame,
@@ -252,7 +372,7 @@ class AgvGuiNode(Node):
             width=18,
             height=2,
         )
-        self.stop_button.grid(row=4, column=0, columnspan=2, sticky="ew")
+        self.stop_button.grid(row=5, column=0, columnspan=2, sticky="ew")
 
         self.cobot_button = tk.Button(
             main_frame,
@@ -265,7 +385,7 @@ class AgvGuiNode(Node):
             width=18,
             height=2,
         )
-        self.cobot_button.grid(row=5, column=0, columnspan=2, pady=(8, 0), sticky="ew")
+        self.cobot_button.grid(row=6, column=0, columnspan=2, pady=(8, 0), sticky="ew")
         self._update_mode_button()
         self._update_control_indicators()
         self._update_cobot_button()
@@ -328,6 +448,18 @@ class AgvGuiNode(Node):
     def _on_gui_value_changed(self, event=None) -> None:
         self.free_stop_active = False
         self._update_command_label()
+
+    def _on_config_value_changed(self, event=None) -> None:
+        self.reference_side = self._normalize_reference_side(
+            self.reference_side_var.get()
+        )
+        self.target_side_mode = self._normalize_target_side_mode(
+            self.target_side_var.get()
+        )
+        self.auto_harvest_enabled = bool(self.auto_harvest_var.get())
+        self.reference_side_var.set(self.reference_side)
+        self.target_side_var.set(self.target_side_mode)
+        self._publish_stage_config()
 
     def _normalize_wheel_value(self, value: float) -> int:
         wheel_speed = self._clamp_wheel_value(value)
@@ -434,11 +566,19 @@ class AgvGuiNode(Node):
         msg.data = command
         self.pub_searching_mode_cmd.publish(msg)
 
+    def _publish_stage_config(self) -> None:
+        self.pub_reference_side.publish(String(data=self.reference_side))
+        self.pub_target_side_mode.publish(String(data=self.target_side_mode))
+        self.pub_auto_harvest.publish(
+            String(data=self._format_bool(self.auto_harvest_enabled))
+        )
+
     def _publish_command(self) -> None:
         if self.is_closing:
             return
 
         rclpy.spin_once(self, timeout_sec=0.0)
+        self._on_config_value_changed()
         self._publish_control_mode()
         if self.control_mode == CONTROL_MODE_MANUAL:
             if self.free_stop_active:
@@ -600,6 +740,40 @@ class AgvGuiNode(Node):
     ) -> None:
         color = active_color if is_active else INDICATOR_OFF_COLOR
         indicator.itemconfigure("light", fill=color, outline=color)
+
+    @staticmethod
+    def _normalize_reference_side(value) -> str:
+        side = str(value).strip().lower()
+        if side in (SIDE_AUTO, SIDE_LEFT, SIDE_RIGHT):
+            return side
+
+        return SIDE_AUTO
+
+    @staticmethod
+    def _normalize_target_side_mode(value) -> str:
+        side = str(value).strip().lower()
+        if side in (SIDE_ANY, SIDE_LEFT, SIDE_RIGHT):
+            return side
+
+        return SIDE_ANY
+
+    @staticmethod
+    def _parse_bool_value(value, default_value: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+
+        normalized_value = str(value).strip().lower()
+        if normalized_value in ("true", "1", "yes", "on"):
+            return True
+
+        if normalized_value in ("false", "0", "no", "off"):
+            return False
+
+        return bool(default_value)
+
+    @staticmethod
+    def _format_bool(value: bool) -> str:
+        return "true" if value else "false"
 
     @staticmethod
     def _parse_key_value_message(data: str) -> dict[str, str]:

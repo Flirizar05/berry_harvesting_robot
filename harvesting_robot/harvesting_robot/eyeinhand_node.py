@@ -52,7 +52,7 @@ class EyeInHandNode(Node):
 
         # Offsets are applied after the point has been transformed into target_frame.
         self.declare_parameter("x_offset_m", -0.055)
-        self.declare_parameter("y_offset_m", 0.015)
+        self.declare_parameter("y_offset_m", 0.0)
         self.declare_parameter("z_offset_m", 0.035)
         #self.declare_parameter("z_offset_m", 0.11)
 

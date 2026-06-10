@@ -41,7 +41,7 @@ class GripperNode(Node):
         self.declare_parameter("cmd_topic", "/gripper/cmd")
         self.declare_parameter("status_topic", "/gripper/status")
 
-        self.declare_parameter("esp32_ip", "192.168.137.43")
+        self.declare_parameter("esp32_ip", "10.42.0.59")
         self.declare_parameter("esp32_port", 5000)
         self.declare_parameter("connect_on_start", False)
         self.declare_parameter("connect_timeout_sec", 3.0)

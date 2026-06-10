@@ -44,6 +44,7 @@ setup(
             "gripper_node = harvesting_robot.gripper_node:main",
             "camera_node = harvesting_robot.camera_node:main",
             "searching_mode_node = harvesting_robot.searching_mode_node:main",
+            "obb_pca_vision_node = harvesting_robot.obb_pca_vision_node:main",
         ],
     },
 )

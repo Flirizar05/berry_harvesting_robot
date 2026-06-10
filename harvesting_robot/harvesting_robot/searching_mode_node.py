@@ -30,6 +30,14 @@ DEFAULT_TARGET_DISTANCE_REFERENCE_XYZ = [0.0, 0.0, 0.28481]
 AGV_CONTROL_MODE_AUTOMATIC = "automatic"
 AGV_CONTROL_MODE_MANUAL = "manual"
 DEFAULT_LIDAR_SIDE_CLEARANCE_TOPIC = "/agv/line_detections"
+DEFAULT_TARGET_SIDE_MODE_TOPIC = "/searching_mode/target_side"
+DEFAULT_ACTIVE_TARGET_SIDE_TOPIC = "/searching_mode/active_target_side"
+DEFAULT_AUTO_HARVEST_TOPIC = "/searching_mode/auto_harvest"
+DEFAULT_MASTER_CMD_TOPIC = "/master/cmd"
+DEFAULT_MASTER_STATUS_TOPIC = "/master/status"
+TARGET_SIDE_ANY = "any"
+TARGET_SIDE_LEFT = "left"
+TARGET_SIDE_RIGHT = "right"
 
 
 class SearchingModeNode(Node):
@@ -52,6 +60,8 @@ class SearchingModeNode(Node):
         self.eye_compute_timer = None
         self.final_confirmation_timer = None
         self.final_stop_timer = None
+        self.auto_harvest_start_timer = None
+        self.post_harvest_resume_timer = None
         self.active_oscillation_min_deg = self.oscillation_min_deg
         self.active_oscillation_max_deg = self.oscillation_max_deg
         self.next_oscillation_target_deg = self.oscillation_max_deg
@@ -64,6 +74,10 @@ class SearchingModeNode(Node):
         self.target_side = None
         self.is_finalizing_target = False
         self.final_target_confirmed = False
+        self.auto_harvest_active = False
+        self.auto_harvest_started = False
+        self.auto_harvest_start_retries_remaining = 0
+        self.latest_master_status = "IDLE"
         self.lidar_region_confirmation_active = False
         self.lidar_region_detection_side = None
         self.lidar_region_detection_time = None
@@ -154,6 +168,27 @@ class SearchingModeNode(Node):
             "lidar_side_clearance_topic",
             DEFAULT_LIDAR_SIDE_CLEARANCE_TOPIC,
         )
+        self.declare_parameter("target_side_mode", TARGET_SIDE_ANY)
+        self.declare_parameter(
+            "target_side_mode_topic",
+            DEFAULT_TARGET_SIDE_MODE_TOPIC,
+        )
+        self.declare_parameter(
+            "active_target_side_topic",
+            DEFAULT_ACTIVE_TARGET_SIDE_TOPIC,
+        )
+        self.declare_parameter("auto_harvest_enabled", True)
+        self.declare_parameter(
+            "auto_harvest_topic",
+            DEFAULT_AUTO_HARVEST_TOPIC,
+        )
+        self.declare_parameter("master_cmd_topic", DEFAULT_MASTER_CMD_TOPIC)
+        self.declare_parameter("master_status_topic", DEFAULT_MASTER_STATUS_TOPIC)
+        self.declare_parameter("master_start_command", "START")
+        self.declare_parameter("master_stop_command", "STOP")
+        self.declare_parameter("master_start_retry_period_sec", 0.50)
+        self.declare_parameter("master_start_retry_count", 6)
+        self.declare_parameter("post_harvest_resume_delay_sec", 5.0)
         self.declare_parameter("lidar_region_confirmation_timeout_sec", 3.0)
         self.declare_parameter("camera_detection_recent_timeout_sec", 0.6)
         self.declare_parameter(
@@ -304,6 +339,58 @@ class SearchingModeNode(Node):
         ).strip()
         if not self.lidar_side_clearance_topic:
             self.lidar_side_clearance_topic = DEFAULT_LIDAR_SIDE_CLEARANCE_TOPIC
+        self.target_side_mode = self._normalize_target_side_mode(
+            self.get_parameter("target_side_mode").value
+        )
+        self.target_side_mode_topic = str(
+            self.get_parameter("target_side_mode_topic").value
+        ).strip()
+        if not self.target_side_mode_topic:
+            self.target_side_mode_topic = DEFAULT_TARGET_SIDE_MODE_TOPIC
+        self.active_target_side_topic = str(
+            self.get_parameter("active_target_side_topic").value
+        ).strip()
+        if not self.active_target_side_topic:
+            self.active_target_side_topic = DEFAULT_ACTIVE_TARGET_SIDE_TOPIC
+        self.auto_harvest_enabled = self._normalize_bool(
+            self.get_parameter("auto_harvest_enabled").value,
+            default_value=True,
+        )
+        self.auto_harvest_topic = str(
+            self.get_parameter("auto_harvest_topic").value
+        ).strip()
+        if not self.auto_harvest_topic:
+            self.auto_harvest_topic = DEFAULT_AUTO_HARVEST_TOPIC
+        self.master_cmd_topic = str(
+            self.get_parameter("master_cmd_topic").value
+        ).strip()
+        if not self.master_cmd_topic:
+            self.master_cmd_topic = DEFAULT_MASTER_CMD_TOPIC
+        self.master_status_topic = str(
+            self.get_parameter("master_status_topic").value
+        ).strip()
+        if not self.master_status_topic:
+            self.master_status_topic = DEFAULT_MASTER_STATUS_TOPIC
+        self.master_start_command = str(
+            self.get_parameter("master_start_command").value
+        ).strip()
+        if not self.master_start_command:
+            self.master_start_command = "START"
+        self.master_stop_command = str(
+            self.get_parameter("master_stop_command").value
+        ).strip()
+        if not self.master_stop_command:
+            self.master_stop_command = "STOP"
+        self.master_start_retry_period_sec = float(
+            self.get_parameter("master_start_retry_period_sec").value
+        )
+        self.master_start_retry_count = int(
+            self.get_parameter("master_start_retry_count").value
+        )
+        self.post_harvest_resume_delay_sec = max(
+            0.0,
+            float(self.get_parameter("post_harvest_resume_delay_sec").value),
+        )
         self.lidar_region_confirmation_timeout_sec = float(
             self.get_parameter("lidar_region_confirmation_timeout_sec").value
         )
@@ -422,6 +509,16 @@ class SearchingModeNode(Node):
             self.agv_control_mode_topic,
             10,
         )
+        self.master_cmd_publisher = self.create_publisher(
+            String,
+            self.master_cmd_topic,
+            10,
+        )
+        self.active_target_side_publisher = self.create_publisher(
+            String,
+            self.active_target_side_topic,
+            10,
+        )
         self.trajectory_publisher = self.create_publisher(
             JointTrajectory,
             self.controller_topic,
@@ -450,6 +547,24 @@ class SearchingModeNode(Node):
             String,
             self.lidar_side_clearance_topic,
             self._on_lidar_side_clearance,
+            10,
+        )
+        self.create_subscription(
+            String,
+            self.target_side_mode_topic,
+            self._on_target_side_mode,
+            10,
+        )
+        self.create_subscription(
+            String,
+            self.auto_harvest_topic,
+            self._on_auto_harvest_enabled,
+            10,
+        )
+        self.create_subscription(
+            String,
+            self.master_status_topic,
+            self._on_master_status,
             10,
         )
         self.create_subscription(Image, self.color_topic, self._on_color_image, 10)
@@ -559,6 +674,8 @@ class SearchingModeNode(Node):
             side = values.get("side_clearance_side", "none").strip().lower()
             if side not in ("left", "right"):
                 return
+            if not self._target_side_allowed(side):
+                return
 
             nearest_m = self._parse_optional_float(
                 values.get("side_clearance_nearest_m")
@@ -580,9 +697,57 @@ class SearchingModeNode(Node):
             y_m=y_m,
         )
 
+    def _on_target_side_mode(self, msg: String) -> None:
+        target_side_mode = self._normalize_target_side_mode(msg.data)
+        if target_side_mode == self.target_side_mode:
+            return
+
+        self.target_side_mode = target_side_mode
+        self.get_logger().info(
+            f"Target side mode changed to {self.target_side_mode}"
+        )
+        if (
+            self.is_busy
+            and not self.is_finalizing_target
+            and self.target_side is not None
+            and not self._target_side_allowed(self.target_side)
+        ):
+            self._reset_to_full_oscillation(0.0)
+
+    def _on_auto_harvest_enabled(self, msg: String) -> None:
+        enabled = self._normalize_bool(msg.data, default_value=self.auto_harvest_enabled)
+        if enabled == self.auto_harvest_enabled:
+            return
+
+        self.auto_harvest_enabled = enabled
+        self.get_logger().info(
+            f"Auto harvesting {'enabled' if enabled else 'disabled'}"
+        )
+
+    def _on_master_status(self, msg: String) -> None:
+        status = msg.data.strip().upper()
+        if not status:
+            return
+
+        self.latest_master_status = status
+        if not self.auto_harvest_active:
+            return
+
+        if status == "BUSY":
+            self.auto_harvest_started = True
+            return
+
+        if status == "DONE_OK":
+            self._handle_auto_harvest_done()
+            return
+
+        if status == "DONE_FAIL":
+            self._recover_after_auto_harvest_failure("master_node DONE_FAIL")
+
     def _should_accept_lidar_region_trigger(self) -> bool:
         return (
             self.is_busy
+            and not self.auto_harvest_active
             and not self.is_finalizing_target
             and self.target_side is None
             and not self._has_recent_camera_detection()
@@ -653,6 +818,9 @@ class SearchingModeNode(Node):
         self.target_side = None
         self.is_finalizing_target = False
         self.final_target_confirmed = False
+        self.auto_harvest_active = False
+        self.auto_harvest_started = False
+        self.auto_harvest_start_retries_remaining = 0
         self.lidar_region_confirmation_active = False
         self.lidar_region_detection_side = None
         self.lidar_region_detection_time = None
@@ -663,6 +831,7 @@ class SearchingModeNode(Node):
         self.active_oscillation_min_deg = self.oscillation_min_deg
         self.active_oscillation_max_deg = self.oscillation_max_deg
         self.status_publisher.publish(String(data="BUSY"))
+        self._publish_active_target_side(None)
         if not self._publish_search_pose():
             self._finish("DONE_FAIL")
             return
@@ -681,6 +850,11 @@ class SearchingModeNode(Node):
         if not self.is_busy:
             self.status_publisher.publish(String(data="IDLE"))
             return
+
+        if self.auto_harvest_active:
+            self.master_cmd_publisher.publish(
+                String(data=self.master_stop_command)
+            )
 
         status = "DONE_OK" if command == "STOP" else "DONE_FAIL"
         self._finish(status)
@@ -853,6 +1027,7 @@ class SearchingModeNode(Node):
             not self.is_finalizing_target
             and self.target_side is None
             and target_side in ("left", "right")
+            and self._target_side_allowed(target_side)
         ):
             self._start_side_refinement(side, target_side)
 
@@ -899,6 +1074,7 @@ class SearchingModeNode(Node):
     def _start_side_refinement(self, robot_side: str, target_side: str) -> None:
         self.robot_side = robot_side
         self.target_side = target_side
+        self._publish_active_target_side(target_side)
         (
             self.active_oscillation_min_deg,
             self.active_oscillation_max_deg,
@@ -934,10 +1110,15 @@ class SearchingModeNode(Node):
 
         self._reset_to_full_oscillation(elapsed_sec)
 
-    def _reset_to_full_oscillation(self, elapsed_sec: float) -> None:
+    def _reset_to_full_oscillation(
+        self,
+        elapsed_sec: float,
+        reason: str = "berry_lost",
+    ) -> None:
         previous_side = self.target_side
         self.robot_side = None
         self.target_side = None
+        self._publish_active_target_side(None)
         self.closest_detection_distance_m = None
         self.last_berry_detection_time = None
         self.final_target_confirmed = False
@@ -958,15 +1139,22 @@ class SearchingModeNode(Node):
             String(
                 data=(
                     f"stage=reset,"
+                    f"reason={reason},"
                     f"previous_side={previous_side},"
                     f"lost_for_sec={elapsed_sec:.2f}"
                 )
             )
         )
-        self.get_logger().warn(
-            f"Berry lost for {elapsed_sec:.2f}s. "
-            "Resetting to full oscillation."
-        )
+        if reason == "berry_lost":
+            self.get_logger().warn(
+                f"Berry lost for {elapsed_sec:.2f}s. "
+                "Resetting to full oscillation."
+            )
+        else:
+            self.get_logger().info(
+                f"{reason} after {elapsed_sec:.2f}s. "
+                "Resetting to full oscillation."
+            )
 
     def _refine_range_for_side(self, side: str) -> tuple[float, float]:
         if side == "left":
@@ -1027,6 +1215,7 @@ class SearchingModeNode(Node):
         review_joint_deg = self._final_joint_for_side(side)
         self.lidar_region_confirmation_active = True
         self.lidar_region_detection_side = side
+        self._publish_active_target_side(side)
         self.lidar_region_detection_time = self.get_clock().now()
         self.is_finalizing_target = True
         self.is_oscillating = False
@@ -1085,8 +1274,16 @@ class SearchingModeNode(Node):
             or self.final_target_confirmed
         ):
             return
+        if (
+            self.lidar_region_detection_side is not None
+            and target_side != self.lidar_region_detection_side
+        ):
+            return
 
         self.final_target_confirmed = True
+        self.robot_side = side
+        self.target_side = target_side
+        self._publish_active_target_side(target_side)
         self._destroy_timer("final_confirmation_timer")
         self._publish_agv_stop_sequence()
         self.status_publisher.publish(String(data="HARVESTING"))
@@ -1109,6 +1306,10 @@ class SearchingModeNode(Node):
             "LiDAR region trigger confirmed by camera. "
             "Keeping HARVESTING active and AGV stopped."
         )
+        if self._start_auto_harvest_cycle("lidar_region_camera_confirmed"):
+            return
+
+        self._finish("DONE_OK")
 
     def _recover_after_lidar_region_false_alarm(self) -> None:
         self._destroy_timer("final_confirmation_timer")
@@ -1161,11 +1362,175 @@ class SearchingModeNode(Node):
         if previous_command:
             self.agv_cmd_publisher.publish(String(data=previous_command))
 
+    def _start_auto_harvest_cycle(self, reason: str) -> bool:
+        if not self.auto_harvest_enabled:
+            self.get_logger().info(
+                "Auto harvesting disabled; confirmed target will not start master_node."
+            )
+            return False
+
+        if not self.is_busy:
+            self.get_logger().warn(
+                "Auto harvesting ignored because searching mode is not active."
+            )
+            return False
+
+        if self.auto_harvest_active:
+            return True
+
+        self.auto_harvest_active = True
+        self.auto_harvest_started = False
+        self.auto_harvest_start_retries_remaining = max(
+            1,
+            int(self.master_start_retry_count),
+        )
+        self._destroy_timer("auto_harvest_start_timer")
+        self._destroy_timer("post_harvest_resume_timer")
+        self.status_publisher.publish(String(data="HARVESTING"))
+        self.detection_result_publisher.publish(
+            String(
+                data=(
+                    f"stage=auto_harvest_start,"
+                    f"reason={reason},"
+                    f"target_side={self.target_side or 'unknown'},"
+                    f"master_cmd_topic={self.master_cmd_topic}"
+                )
+            )
+        )
+        self._publish_master_start()
+        self.auto_harvest_start_timer = self.create_timer(
+            self._positive_seconds(self.master_start_retry_period_sec),
+            self._retry_master_start,
+        )
+        self.get_logger().info(
+            "Auto harvesting cycle requested through master_node "
+            f"({self.master_cmd_topic} {self.master_start_command})."
+        )
+        return True
+
+    def _publish_master_start(self) -> None:
+        self.master_cmd_publisher.publish(String(data=self.master_start_command))
+
+    def _retry_master_start(self) -> None:
+        if not self.auto_harvest_active or self.auto_harvest_started:
+            self._destroy_timer("auto_harvest_start_timer")
+            return
+
+        self.auto_harvest_start_retries_remaining -= 1
+        if self.auto_harvest_start_retries_remaining <= 0:
+            self._destroy_timer("auto_harvest_start_timer")
+            self._recover_after_auto_harvest_failure(
+                "master_node START not acknowledged"
+            )
+            return
+
+        self._publish_master_start()
+
+    def _handle_auto_harvest_done(self) -> None:
+        if not self.auto_harvest_active:
+            return
+
+        self._destroy_timer("auto_harvest_start_timer")
+        self.auto_harvest_active = False
+        self.auto_harvest_started = False
+        self._destroy_timer("post_harvest_resume_timer")
+        self.detection_result_publisher.publish(
+            String(
+                data=(
+                    f"stage=auto_harvest_done,"
+                    f"status=DONE_OK,"
+                    f"resume_delay_sec={self.post_harvest_resume_delay_sec:.2f}"
+                )
+            )
+        )
+        self.post_harvest_resume_timer = self.create_timer(
+            self._positive_seconds(self.post_harvest_resume_delay_sec),
+            self._resume_after_auto_harvest_done,
+        )
+        self.get_logger().info(
+            "Auto harvesting cycle completed. DONE_OK. "
+            f"Holding position for {self.post_harvest_resume_delay_sec:.1f}s "
+            "before returning to base oscillation."
+        )
+
+    def _resume_after_auto_harvest_done(self) -> None:
+        previous_mode = self.agv_mode_before_stop
+        should_restore_automatic = previous_mode == AGV_CONTROL_MODE_AUTOMATIC
+
+        self._destroy_timer("post_harvest_resume_timer")
+        self._destroy_timer("final_stop_timer")
+        self.auto_harvest_active = False
+        self.auto_harvest_started = False
+        self.auto_harvest_start_retries_remaining = 0
+        self.final_target_confirmed = False
+        self.lidar_region_confirmation_active = False
+        self.lidar_region_detection_side = None
+        self.lidar_region_detection_time = None
+        self.is_finalizing_target = False
+        self.is_oscillating = True
+        self._reset_to_full_oscillation(
+            self.post_harvest_resume_delay_sec,
+            reason="post_harvest_resume",
+        )
+        if should_restore_automatic:
+            self._publish_agv_automatic()
+
+        self.detection_result_publisher.publish(
+            String(
+                data=(
+                    f"stage=post_harvest_resume,"
+                    f"restored_automatic={self._format_bool(should_restore_automatic)}"
+                )
+            )
+        )
+        self.agv_mode_before_stop = None
+        self.agv_command_before_lidar_stop = None
+        self.get_logger().info(
+            "Post-harvest wait complete. "
+            "Returning cobot to base oscillation"
+            + (" and restoring AGV automatic mode." if should_restore_automatic else ".")
+        )
+
+    def _recover_after_auto_harvest_failure(self, reason: str) -> None:
+        if not self.auto_harvest_active:
+            return
+
+        previous_mode = self.agv_mode_before_stop
+        previous_command = self.agv_command_before_lidar_stop
+        self._destroy_timer("auto_harvest_start_timer")
+        self._destroy_timer("final_stop_timer")
+        self.master_cmd_publisher.publish(String(data=self.master_stop_command))
+        self.auto_harvest_active = False
+        self.auto_harvest_started = False
+        self.final_target_confirmed = False
+        self.lidar_region_confirmation_active = False
+        self.lidar_region_detection_side = None
+        self.lidar_region_detection_time = None
+        self.is_finalizing_target = False
+        self.is_oscillating = True
+        self._reset_to_full_oscillation(0.0)
+        self._restore_agv_after_lidar_false_alarm(previous_mode, previous_command)
+        self.detection_result_publisher.publish(
+            String(
+                data=(
+                    f"stage=auto_harvest_failed,"
+                    f"reason={reason},"
+                    f"restored_mode={previous_mode or 'unknown'}"
+                )
+            )
+        )
+        self.agv_mode_before_stop = None
+        self.agv_command_before_lidar_stop = None
+        self.get_logger().warn(
+            f"Auto harvesting failed ({reason}). Returning to oscillation search."
+        )
+
     def _confirm_final_target(self, target_distance_m: float) -> None:
         if not self.is_finalizing_target or self.final_target_confirmed:
             return
 
         self.final_target_confirmed = True
+        self._publish_active_target_side(self.target_side)
         self._destroy_timer("final_confirmation_timer")
         self._publish_agv_stop_sequence()
         self.detection_result_publisher.publish(
@@ -1179,8 +1544,11 @@ class SearchingModeNode(Node):
             )
         )
         self.get_logger().info(
-            f"Final target confirmed at {target_distance_m:.3f} m. DONE_OK"
+            f"Final target confirmed at {target_distance_m:.3f} m."
         )
+        if self._start_auto_harvest_cycle("final_target_confirmed"):
+            return
+
         self._finish("DONE_OK")
 
     def _recover_after_final_target_timeout(self) -> None:
@@ -1541,6 +1909,10 @@ class SearchingModeNode(Node):
         self._destroy_timer("eye_compute_timer")
         self.eye_cmd_publisher.publish(String(data="COMPUTE"))
 
+    def _publish_active_target_side(self, target_side: str | None) -> None:
+        side = target_side if target_side in ("left", "right") else "none"
+        self.active_target_side_publisher.publish(String(data=side))
+
     def _depth_to_meters(self, depth_value) -> float:
         if (
             isinstance(self.latest_depth_image, np.ndarray)
@@ -1674,6 +2046,12 @@ class SearchingModeNode(Node):
         ).nanoseconds * 1e-9
         return age_sec <= max(0.0, self.camera_detection_recent_timeout_sec)
 
+    def _target_side_allowed(self, target_side: str | None) -> bool:
+        if self.target_side_mode == TARGET_SIDE_ANY:
+            return True
+
+        return target_side == self.target_side_mode
+
     @staticmethod
     def _parse_key_value_message(data: str) -> dict[str, str]:
         values = {}
@@ -1705,6 +2083,28 @@ class SearchingModeNode(Node):
         return value.strip().lower() in ("true", "1", "yes", "on")
 
     @staticmethod
+    def _normalize_target_side_mode(value) -> str:
+        mode = str(value).strip().lower()
+        if mode in (TARGET_SIDE_ANY, TARGET_SIDE_LEFT, TARGET_SIDE_RIGHT):
+            return mode
+
+        return TARGET_SIDE_ANY
+
+    @staticmethod
+    def _normalize_bool(value, default_value: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+
+        normalized_value = str(value).strip().lower()
+        if normalized_value in ("true", "1", "yes", "on"):
+            return True
+
+        if normalized_value in ("false", "0", "no", "off"):
+            return False
+
+        return bool(default_value)
+
+    @staticmethod
     def _format_optional_float(value: float | None) -> str:
         if value is None:
             return "none"
@@ -1720,6 +2120,9 @@ class SearchingModeNode(Node):
         self.is_oscillating = False
         self.is_finalizing_target = False
         self.final_target_confirmed = False
+        self.auto_harvest_active = False
+        self.auto_harvest_started = False
+        self.auto_harvest_start_retries_remaining = 0
         self.latest_target_base_distance_m = None
         self.latest_target_base_time = None
         self.lidar_region_confirmation_active = False
@@ -1729,11 +2132,14 @@ class SearchingModeNode(Node):
         self.agv_command_before_lidar_stop = None
         self.robot_side = None
         self.target_side = None
+        self._publish_active_target_side(None)
         self._destroy_timer("initial_pose_timer")
         self._destroy_timer("oscillation_timer")
         self._destroy_timer("eye_compute_timer")
         self._destroy_timer("final_confirmation_timer")
         self._destroy_timer("final_stop_timer")
+        self._destroy_timer("auto_harvest_start_timer")
+        self._destroy_timer("post_harvest_resume_timer")
         self.status_publisher.publish(String(data=status))
         self.status_publisher.publish(String(data="IDLE"))
 

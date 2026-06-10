@@ -7,7 +7,7 @@ import rclpy
 from builtin_interfaces.msg import Duration
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Bool, Float32, String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 
@@ -32,8 +32,8 @@ class MasterNode(Node):
         self.declare_parameter("loop_dt", 0.02)
 
         #self.declare_parameter("stop_distance_m", 0.25)
-        self.declare_parameter("stop_distance_m", 0.01)
-        self.declare_parameter("stop_margin_m", 0.01)
+        self.declare_parameter("stop_distance_m", 0.03)
+        self.declare_parameter("stop_margin_m", 0.02)
         self.declare_parameter("dist_fresh_timeout_sec", 2.0)
 
         self.declare_parameter("vision_timeout_sec", 6.0)
@@ -76,6 +76,7 @@ class MasterNode(Node):
         self.declare_parameter("ctrl_status", "/control/status")
 
         self.declare_parameter("tcp_target_dist_topic", "/trajectory/tcp_target_dist")
+        self.declare_parameter("traj_final_approach_topic", "/trajectory/final_approach")
         self.declare_parameter("controller_topic", "/joint_trajectory_controller/joint_trajectory")
         self.declare_parameter("joint_state_topic", "/joint_states")
 
@@ -87,6 +88,10 @@ class MasterNode(Node):
         self.declare_parameter("pf_cmd", "/potentialfields/cmd")
         self.declare_parameter("pf_status", "/potentialfields/status")
         self.declare_parameter("pf_timeout_sec", 6.0)
+        self.declare_parameter("obb_pca_cmd", "/obb_pca/cmd")
+        self.declare_parameter("obb_pca_capture_cmd", "CAPTURE")
+        self.declare_parameter("obb_pca_reset_cmd", "RESET")
+        self.declare_parameter("trigger_obb_pca_at_final_vision", True)
 
         self.declare_parameter("hyrrt_cmd", "/hyrrt/cmd")
         self.declare_parameter("hyrrt_status", "/hyrrt/status")
@@ -106,6 +111,8 @@ class MasterNode(Node):
         self.declare_parameter("cmd_release", "RELEASE")
 
         self.declare_parameter("mode1_use_pf_vision", True)
+        self.declare_parameter("mode1_execute_stream", True)
+        self.declare_parameter("mode1_final_approach_distance_m", 0.10)
 
     def _load_parameters(self) -> None:
         self.loop_dt = float(self.get_parameter("loop_dt").value)
@@ -151,6 +158,9 @@ class MasterNode(Node):
         self.tcp_target_dist_topic = str(
             self.get_parameter("tcp_target_dist_topic").value
         )
+        self.traj_final_approach_topic = str(
+            self.get_parameter("traj_final_approach_topic").value
+        )
         self.controller_topic = str(self.get_parameter("controller_topic").value)
         self.joint_state_topic = str(self.get_parameter("joint_state_topic").value)
 
@@ -160,6 +170,16 @@ class MasterNode(Node):
         self.pf_cmd_topic = str(self.get_parameter("pf_cmd").value)
         self.pf_status_topic = str(self.get_parameter("pf_status").value)
         self.pf_timeout_sec = float(self.get_parameter("pf_timeout_sec").value)
+        self.obb_pca_cmd_topic = str(self.get_parameter("obb_pca_cmd").value)
+        self.obb_pca_capture_command = str(
+            self.get_parameter("obb_pca_capture_cmd").value
+        )
+        self.obb_pca_reset_command = str(
+            self.get_parameter("obb_pca_reset_cmd").value
+        )
+        self.trigger_obb_pca_at_final_vision = bool(
+            self.get_parameter("trigger_obb_pca_at_final_vision").value
+        )
 
         self.hyrrt_cmd_topic = str(self.get_parameter("hyrrt_cmd").value)
         self.hyrrt_status_topic = str(self.get_parameter("hyrrt_status").value)
@@ -187,6 +207,12 @@ class MasterNode(Node):
         self.cmd_release = str(self.get_parameter("cmd_release").value)
 
         self.mode1_use_pf_vision = bool(self.get_parameter("mode1_use_pf_vision").value)
+        self.mode1_execute_stream = bool(
+            self.get_parameter("mode1_execute_stream").value
+        )
+        self.mode1_final_approach_distance_m = float(
+            self.get_parameter("mode1_final_approach_distance_m").value
+        )
 
     def _create_publishers(self) -> None:
         self.pub_status = self.create_publisher(String, self.master_status_topic, 10)
@@ -198,6 +224,11 @@ class MasterNode(Node):
         self.pub_home = self.create_publisher(JointTrajectory, self.controller_topic, 10)
 
         self.pub_pf_cmd = self.create_publisher(String, self.pf_cmd_topic, 10)
+        self.pub_obb_pca_cmd = self.create_publisher(
+            String,
+            self.obb_pca_cmd_topic,
+            10,
+        )
         self.pub_hyrrt_cmd = self.create_publisher(String, self.hyrrt_cmd_topic, 10)
         self.pub_gripper_cmd = self.create_publisher(String, self.gripper_cmd_topic, 10)
 
@@ -210,6 +241,7 @@ class MasterNode(Node):
         self.create_subscription(String, self.ctrl_status_topic, self._on_ctrl_status, 10)
 
         self.create_subscription(Float32, self.tcp_target_dist_topic, self._on_distance, 10)
+        self.create_subscription(Bool, self.traj_final_approach_topic, self._on_traj_final_approach, 10)
         self.create_subscription(JointState, self.joint_state_topic, self._on_joint_state, 50)
 
         self.create_subscription(String, self.pf_status_topic, self._on_pf_status, 10)
@@ -232,6 +264,12 @@ class MasterNode(Node):
 
         self.latest_tcp_target_distance = None
         self.latest_distance_time = None
+        self.mode1_final_approach_active = False
+        self.mode1_final_vision_pending = False
+        self.mode1_final_vision_done = False
+        self.latest_final_approach_time = None
+        self.gripper_finish_reason = "Grasp DONE_OK"
+        self.obb_pca_trigger_sent = False
 
         self.current_joint_positions = None
         self.home_command_sent = False
@@ -263,6 +301,21 @@ class MasterNode(Node):
         age_sec = (self._now() - self.latest_distance_time).nanoseconds * 1e-9
         return age_sec <= self.distance_fresh_timeout_sec
 
+    def _distance_predicts_final_approach(self) -> bool:
+        if self.latest_tcp_target_distance is None or not self._distance_is_fresh():
+            return False
+        return (
+            float(self.latest_tcp_target_distance)
+            <= self.mode1_final_approach_distance_m
+        )
+
+    def _tcp_target_within_stop_threshold(self) -> bool:
+        if self.latest_tcp_target_distance is None or not self._distance_is_fresh():
+            return False
+
+        stop_threshold = self.stop_distance_m + self.stop_margin_m
+        return float(self.latest_tcp_target_distance) <= stop_threshold
+
     def _send_home_trajectory(self) -> None:
         trajectory_msg = JointTrajectory()
         trajectory_msg.joint_names = self.home_joint_names
@@ -277,18 +330,52 @@ class MasterNode(Node):
         self.pub_home.publish(trajectory_msg)
         self.home_last_command_time = self._now()
 
-    def _start_mode1_vision_phase(self) -> None:
+    def _start_mode1_vision_phase(self, final_vision: bool = False) -> None:
+        self.mode1_final_approach_active = False
+        self.mode1_final_vision_pending = bool(final_vision)
+        self.latest_final_approach_time = None
+
+        if final_vision:
+            self._trigger_obb_pca_once("mode1 final vision started")
+
         if self.mode1_use_pf_vision:
             self._set_phase("MODE1_PF_VISION")
             self.pf_result = None
             self._publish_string_command(self.pub_pf_cmd, self.cmd_capture)
-            self.get_logger().info("MODE1 -> MODE1_PF_VISION: CAPTURE")
+            if final_vision:
+                self.get_logger().info(
+                    "MODE1 -> MODE1_PF_VISION: final CAPTURE before short approach"
+                )
+            else:
+                self.get_logger().info("MODE1 -> MODE1_PF_VISION: CAPTURE")
             return
 
         self._set_phase("VISION")
         self.vision_result = None
         self._publish_string_command(self.pub_vision_cmd, self.cmd_capture)
-        self.get_logger().info("MODE1 -> VISION: CAPTURE")
+        if final_vision:
+            self.get_logger().info(
+                "MODE1 -> VISION: final CAPTURE before short approach"
+            )
+        else:
+            self.get_logger().info("MODE1 -> VISION: CAPTURE")
+
+    def _start_harvesting_cycle(self) -> None:
+        if self.do_home_on_start:
+            self._set_phase("HOME")
+            self.get_logger().info("MASTER START -> HOME")
+        else:
+            self._start_mode1_vision_phase()
+
+    def _start_after_home(self) -> None:
+        if self.enable_gripper:
+            self._set_phase("GRIPPER_PREOPEN")
+            self.gripper_result = None
+            self._publish_string_command(self.pub_gripper_cmd, self.cmd_release)
+            self.get_logger().info("HOME DONE -> GRIPPER_PREOPEN: RELEASE command sent.")
+            return
+
+        self._start_mode1_vision_phase()
 
     def _start(self) -> None:
         self.busy = True
@@ -304,6 +391,12 @@ class MasterNode(Node):
 
         self.latest_tcp_target_distance = None
         self.latest_distance_time = None
+        self.mode1_final_approach_active = False
+        self.mode1_final_vision_pending = False
+        self.mode1_final_vision_done = False
+        self.latest_final_approach_time = None
+        self.gripper_finish_reason = "Grasp DONE_OK"
+        self.obb_pca_trigger_sent = False
 
         self.home_command_sent = False
         self.home_last_command_time = None
@@ -313,12 +406,13 @@ class MasterNode(Node):
         self.mode2_ctrl_finished = False
 
         self.pub_status.publish(String(data="BUSY"))
+        if self.trigger_obb_pca_at_final_vision and self.obb_pca_reset_command:
+            self._publish_string_command(
+                self.pub_obb_pca_cmd,
+                self.obb_pca_reset_command,
+            )
 
-        if self.do_home_on_start:
-            self._set_phase("HOME")
-            self.get_logger().info("MASTER START -> HOME")
-        else:
-            self._start_mode1_vision_phase()
+        self._start_harvesting_cycle()
 
     def _finish_ok(self, reason: str) -> None:
         self.busy = False
@@ -331,6 +425,42 @@ class MasterNode(Node):
         self.pub_status.publish(String(data="DONE_FAIL"))
         self.pub_status.publish(String(data="IDLE"))
         self.get_logger().warn(f"MASTER DONE_FAIL: {reason}")
+
+    def _start_gripper_or_finish(self, finish_reason: str, disabled_reason: str) -> None:
+        if not self.enable_gripper:
+            self._finish_ok(disabled_reason)
+            return
+
+        self._set_phase("GRIPPER")
+        self.gripper_result = None
+        self.gripper_finish_reason = finish_reason
+        self._publish_string_command(self.pub_gripper_cmd, self.cmd_grasp)
+        self.get_logger().info("GRIPPER: GRASP command sent.")
+
+    def _trigger_obb_pca_once(self, reason: str) -> None:
+        if not self.trigger_obb_pca_at_final_vision:
+            return
+
+        if self.obb_pca_trigger_sent:
+            return
+
+        self.obb_pca_trigger_sent = True
+        self._publish_string_command(
+            self.pub_obb_pca_cmd,
+            self.obb_pca_capture_command,
+        )
+        self.get_logger().info(
+            "OBB/PCA one-shot capture requested "
+            f"({reason}) on {self.obb_pca_cmd_topic}."
+        )
+
+    def _complete_mode1_final_vision(self, reason: str) -> None:
+        if self.mode1_final_vision_done:
+            return
+
+        self.mode1_final_vision_done = True
+        self.mode1_final_vision_pending = False
+        self._trigger_obb_pca_once(reason)
 
     def _abort(self, reason: str) -> None:
         self._publish_string_command(self.pub_traj_cmd, "STOP")
@@ -395,6 +525,10 @@ class MasterNode(Node):
         self.latest_tcp_target_distance = float(msg.data)
         self.latest_distance_time = self._now()
 
+    def _on_traj_final_approach(self, msg: Bool) -> None:
+        self.mode1_final_approach_active = bool(msg.data)
+        self.latest_final_approach_time = self._now()
+
     def _on_joint_state(self, msg: JointState) -> None:
         if not msg.name or not msg.position:
             return
@@ -410,6 +544,21 @@ class MasterNode(Node):
 
     def _control_loop(self) -> None:
         if not self.busy:
+            return
+
+        if self.state == "GRIPPER_PREOPEN":
+            if self.gripper_result == "DONE_OK":
+                self.gripper_result = None
+                self.get_logger().info("GRIPPER_PREOPEN DONE_OK -> MODE1 vision")
+                self._start_mode1_vision_phase()
+                return
+
+            if self.gripper_result == "DONE_FAIL":
+                self._finish_fail("Gripper pre-open DONE_FAIL")
+                return
+
+            if self._elapsed_phase_time() > self.gripper_timeout_sec:
+                self._finish_fail("Gripper pre-open timeout")
             return
 
         if self.state == "HOME":
@@ -441,7 +590,7 @@ class MasterNode(Node):
                 self.home_settle_count = 0
 
             if self.home_settle_count >= self.home_settle_cycles:
-                self._start_mode1_vision_phase()
+                self._start_after_home()
                 return
 
             if self._elapsed_phase_time() > self.home_timeout_sec:
@@ -485,6 +634,10 @@ class MasterNode(Node):
 
             stop_threshold = self.stop_distance_m + self.stop_margin_m
             if float(self.latest_tcp_target_distance) <= stop_threshold:
+                self._complete_mode1_final_vision(
+                    "mode1 final vision at target threshold"
+                )
+
                 if self.enable_mode2:
                     self._publish_string_command(self.pub_traj_cmd, "STOP")
                     self._publish_string_command(self.pub_ctrl_cmd, "STOP")
@@ -495,11 +648,31 @@ class MasterNode(Node):
                     )
                     self._set_phase("PF_VISION")
                     self.pf_result = None
+                    self._trigger_obb_pca_once("mode2 final PF vision")
                     self._publish_string_command(self.pub_pf_cmd, self.cmd_capture)
                     return
 
-                self._finish_ok(f"Target within {stop_threshold:.3f} m")
+                self._start_gripper_or_finish(
+                    "Mode1 final target grasp DONE_OK",
+                    f"Mode1 target within {stop_threshold:.3f} m (gripper disabled)",
+                )
                 return
+
+            self.mode1_final_approach_active = self._distance_predicts_final_approach()
+            self.latest_final_approach_time = None
+            if self.mode1_final_approach_active:
+                self._complete_mode1_final_vision("mode1 final vision before short approach")
+                self.get_logger().info(
+                    "MODE1 final approach planned "
+                    f"(dist={self.latest_tcp_target_distance:.3f} <= "
+                    f"{self.mode1_final_approach_distance_m:.3f} m)"
+                )
+            elif self.mode1_final_vision_pending:
+                self.mode1_final_vision_pending = False
+                self.get_logger().info(
+                    "MODE1 final vision refreshed target outside final region; "
+                    "continuing with normal sigmoid segment."
+                )
 
             self._set_phase("PLAN")
             self.traj_result = None
@@ -514,7 +687,12 @@ class MasterNode(Node):
             if self._elapsed_phase_time() > 0.10:
                 self._set_phase("EXECUTE")
                 self.ctrl_result = None
-                self._publish_string_command(self.pub_ctrl_cmd, self.cmd_execute)
+                execute_command = (
+                    self.cmd_execute_stream
+                    if self.mode1_execute_stream
+                    else self.cmd_execute
+                )
+                self._publish_string_command(self.pub_ctrl_cmd, execute_command)
                 return
 
             if self._elapsed_phase_time() > self.plan_timeout_sec:
@@ -522,8 +700,55 @@ class MasterNode(Node):
             return
 
         if self.state == "EXECUTE":
+            if self.traj_result == "DONE_FAIL":
+                self._finish_fail("Trajectory execution failed")
+                return
+
+            if (
+                self.mode1_final_approach_active
+                and self._tcp_target_within_stop_threshold()
+            ):
+                stop_threshold = self.stop_distance_m + self.stop_margin_m
+                self._publish_string_command(self.pub_traj_cmd, "STOP")
+                self._publish_string_command(self.pub_ctrl_cmd, "STOP")
+                self._start_gripper_or_finish(
+                    "Mode1 final target grasp DONE_OK",
+                    "Mode1 final target reached within "
+                    f"{stop_threshold:.3f} m (gripper disabled)",
+                )
+                return
+
             if self.ctrl_result == "DONE_OK":
                 self.ctrl_result = None
+                if self.mode1_final_approach_active:
+                    self._start_gripper_or_finish(
+                        "Mode1 final target grasp DONE_OK",
+                        "Mode1 final target reached (gripper disabled)",
+                    )
+                    return
+
+                if self._distance_predicts_final_approach():
+                    if not self.mode1_final_vision_done:
+                        self._start_mode1_vision_phase(final_vision=True)
+                        self.get_logger().info(
+                            "MODE1 entering final vision before short approach "
+                            f"(dist={self.latest_tcp_target_distance:.3f} <= "
+                            f"{self.mode1_final_approach_distance_m:.3f} m)"
+                        )
+                        return
+
+                    self.mode1_final_approach_active = True
+                    self.latest_final_approach_time = None
+                    self._set_phase("PLAN")
+                    self.traj_result = None
+                    self._publish_string_command(self.pub_traj_cmd, self.cmd_plan)
+                    self.get_logger().info(
+                        "MODE1 entering direct final approach "
+                        f"(dist={self.latest_tcp_target_distance:.3f} <= "
+                        f"{self.mode1_final_approach_distance_m:.3f} m)"
+                    )
+                    return
+
                 self._start_mode1_vision_phase()
                 return
 
@@ -627,13 +852,10 @@ class MasterNode(Node):
                 return
 
             if self.mode2_hyrrt_finished and self.mode2_ctrl_finished:
-                if not self.enable_gripper:
-                    self._finish_ok("Mode2 DONE_OK (gripper disabled)")
-                    return
-
-                self._set_phase("GRIPPER")
-                self.gripper_result = None
-                self._publish_string_command(self.pub_gripper_cmd, self.cmd_grasp)
+                self._start_gripper_or_finish(
+                    "Mode2 grasp DONE_OK",
+                    "Mode2 DONE_OK (gripper disabled)",
+                )
                 return
 
             if self._elapsed_phase_time() > self.hyrrt_exec_timeout_sec:
@@ -642,7 +864,7 @@ class MasterNode(Node):
 
         if self.state == "GRIPPER":
             if self.gripper_result == "DONE_OK":
-                self._finish_ok("Mode2 grasp DONE_OK")
+                self._finish_ok(self.gripper_finish_reason)
                 return
 
             if self.gripper_result == "DONE_FAIL":

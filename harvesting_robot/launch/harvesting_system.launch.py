@@ -33,6 +33,11 @@ def generate_launch_description():
         "models",
         "best.pt",
     )
+    default_obb_pca_model_path = os.path.join(
+        harvesting_robot_share,
+        "models",
+        "yolo_obb_pca_best.pt",
+    )
 
     nodes = [
         # ---------------------------------------------------------------------
@@ -115,6 +120,40 @@ def generate_launch_description():
                 "target_class_id": pv("search_target_class_id", int),
             }],
         ),
+        Node(
+            package="harvesting_robot",
+            executable="obb_pca_vision_node",
+            name="obb_pca_vision_node",
+            output="screen",
+            parameters=[{
+                "cmd_topic": pv("obb_pca_cmd_topic", str),
+                "status_topic": pv("obb_pca_status_topic", str),
+                "result_topic": pv("obb_pca_result_topic", str),
+                "annotated_topic": pv("obb_pca_annotated_topic", str),
+                "publish_annotated": pv("obb_pca_publish_annotated", bool),
+                "color_topic": pv("camera_color_topic", str),
+                "depth_topic": pv("camera_depth_topic", str),
+                "camera_info_topic": pv("camera_color_info_topic", str),
+                "depth_scale_topic": pv("depth_scale_topic", str),
+                "depth_scale_fallback": pv("depth_scale_fallback", float),
+                "yolo_model_path": pv("obb_pca_yolo_model_path", str),
+                "sam_model_path": pv("obb_pca_sam_model_path", str),
+                "yolo_device": pv("search_yolo_device", str),
+                "conf_thresh": pv("search_conf_thresh", float),
+                "nms_thresh": pv("search_nms_thresh", float),
+                "target_class_id": pv("search_target_class_id", int),
+                "max_detections": pv("obb_pca_max_detections", int),
+                "min_valid_depth_m": pv("search_min_valid_depth_m", float),
+                "max_valid_depth_m": pv("search_max_valid_depth_m", float),
+                "show_result": pv("obb_pca_show_result", bool),
+                "result_window_width": pv("obb_pca_result_window_width", int),
+                "result_window_height": pv("obb_pca_result_window_height", int),
+                "result_window_x": pv("obb_pca_result_window_x", int),
+                "result_window_y": pv("obb_pca_result_window_y", int),
+                "result_wait_ms": pv("obb_pca_result_wait_ms", int),
+                "single_shot": True,
+            }],
+        ),
 
         # ---------------------------------------------------------------------
         # Mode 1 trajectory node
@@ -134,7 +173,10 @@ def generate_launch_description():
                 "waypoint_topic": pv("traj_waypoint_topic", str),
                 "path_topic": pv("traj_path_topic", str),
                 "tcp_target_dist_topic": pv("tcp_target_dist_topic", str),
+                "final_approach_topic": pv("traj_final_approach_topic", str),
                 "projection_distance_m": pv("projection_distance_m", float),
+                "final_approach_direct_target": pv("final_approach_direct_target", bool),
+                "final_approach_goal_tol_m": pv("final_approach_goal_tol_m", float),
             }],
         ),
 
@@ -193,6 +235,9 @@ def generate_launch_description():
                 "waypoint_topic": pv("traj_waypoint_topic", str),
                 "cmd_topic": pv("ctrl_cmd_topic", str),
                 "status_topic": pv("ctrl_status_topic", str),
+                "target_side_mode": pv("target_side_mode", str),
+                "target_side_mode_topic": pv("target_side_mode_topic", str),
+                "active_target_side_topic": pv("active_target_side_topic", str),
                 "execute_timeout_sec": pv("ctrl_execute_timeout_sec", float),
                 "waypoint_timeout_sec": pv("ctrl_waypoint_timeout_sec", float),
                 "enable_nullspace": pv("enable_nullspace", bool),
@@ -228,12 +273,65 @@ def generate_launch_description():
             name="master_node",
             output="screen",
             parameters=[{
+                "master_cmd": pv("master_cmd_topic", str),
+                "master_status": pv("master_status_topic", str),
                 "enable_mode2": pv("enable_mode2", bool),
                 "enable_gripper": pv("enable_gripper", bool),
                 "mode1_use_pf_vision": pv("mode1_use_pf_vision", bool),
+                "mode1_execute_stream": pv("mode1_execute_stream", bool),
+                "mode1_final_approach_distance_m": pv("projection_distance_m", float),
+                "stop_distance_m": pv("master_stop_distance_m", float),
+                "stop_margin_m": pv("master_stop_margin_m", float),
+                "obb_pca_cmd": pv("obb_pca_cmd_topic", str),
+                "trigger_obb_pca_at_final_vision": pv("trigger_obb_pca_at_final_vision", bool),
+                "tcp_target_dist_topic": pv("tcp_target_dist_topic", str),
+                "traj_final_approach_topic": pv("traj_final_approach_topic", str),
                 "do_home_on_start": pv("do_home_on_start", bool),
                 "controller_topic": pv("controller_topic", str),
                 "joint_state_topic": pv("joint_state_topic", str),
+            }],
+        ),
+        Node(
+            package="harvesting_robot",
+            executable="searching_mode_node",
+            name="searching_mode_node",
+            condition=IfCondition(LaunchConfiguration("enable_searching_mode")),
+            output="screen",
+            parameters=[{
+                "cmd_topic": pv("searching_cmd_topic", str),
+                "status_topic": pv("searching_status_topic", str),
+                "controller_topic": pv("controller_topic", str),
+                "color_topic": pv("camera_color_topic", str),
+                "depth_topic": pv("camera_depth_topic", str),
+                "camera_info_topic": pv("camera_color_info_topic", str),
+                "depth_scale_topic": pv("depth_scale_topic", str),
+                "depth_scale_fallback": pv("depth_scale_fallback", float),
+                "joint_state_topic": pv("joint_state_topic", str),
+                "detection_result_topic": pv("searching_detection_result_topic", str),
+                "annotated_image_topic": pv("searching_annotated_image_topic", str),
+                "show_preview": pv("searching_show_preview", bool),
+                "output_point_topic": pv("pf_output_point_topic", str),
+                "target_base_topic": pv("target_topic", str),
+                "eye_cmd_topic": pv("eye_cmd_topic", str),
+                "lidar_side_clearance_topic": pv("lidar_side_clearance_topic", str),
+                "target_side_mode": pv("target_side_mode", str),
+                "target_side_mode_topic": pv("target_side_mode_topic", str),
+                "active_target_side_topic": pv("active_target_side_topic", str),
+                "auto_harvest_enabled": pv("auto_harvest_enabled", bool),
+                "auto_harvest_topic": pv("auto_harvest_topic", str),
+                "master_cmd_topic": pv("master_cmd_topic", str),
+                "master_status_topic": pv("master_status_topic", str),
+                "post_harvest_resume_delay_sec": pv("post_harvest_resume_delay_sec", float),
+                "model_path": pv("search_model_path", str),
+                "yolo_device": pv("search_yolo_device", str),
+                "conf_thresh": pv("search_conf_thresh", float),
+                "nms_thresh": pv("search_nms_thresh", float),
+                "target_class_id": pv("search_target_class_id", int),
+                "min_valid_depth_m": pv("search_min_valid_depth_m", float),
+                "max_valid_depth_m": pv("search_max_valid_depth_m", float),
+                "negative_joint_side": pv("search_negative_joint_side", str),
+                "side_deadband_deg": pv("search_side_deadband_deg", float),
+                "joint_state_max_age_sec": pv("search_joint_state_max_age_sec", float),
             }],
         ),
     ]
@@ -280,7 +378,12 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_mode2", default_value="false"),
         DeclareLaunchArgument("enable_gripper", default_value="false"),
         DeclareLaunchArgument("mode1_use_pf_vision", default_value="true"),
+        DeclareLaunchArgument("mode1_execute_stream", default_value="true"),
         DeclareLaunchArgument("do_home_on_start", default_value="true"),
+        DeclareLaunchArgument("enable_searching_mode", default_value="true"),
+        DeclareLaunchArgument("trigger_obb_pca_at_final_vision", default_value="true"),
+        DeclareLaunchArgument("master_cmd_topic", default_value="/master/cmd"),
+        DeclareLaunchArgument("master_status_topic", default_value="/master/status"),
 
         # ---------------------------------------------------------------------
         # PF vision model
@@ -295,9 +398,59 @@ def generate_launch_description():
         DeclareLaunchArgument("search_target_class_id", default_value="2"),
         DeclareLaunchArgument("search_min_valid_depth_m", default_value="0.10"),
         DeclareLaunchArgument("search_max_valid_depth_m", default_value="2.00"),
+        DeclareLaunchArgument("obb_pca_cmd_topic", default_value="/obb_pca/cmd"),
+        DeclareLaunchArgument("obb_pca_status_topic", default_value="/obb_pca/status"),
+        DeclareLaunchArgument("obb_pca_result_topic", default_value="/obb_pca/result"),
+        DeclareLaunchArgument(
+            "obb_pca_yolo_model_path",
+            default_value=default_obb_pca_model_path,
+        ),
+        DeclareLaunchArgument(
+            "obb_pca_annotated_topic",
+            default_value="/obb_pca/annotated_image",
+        ),
+        DeclareLaunchArgument("obb_pca_publish_annotated", default_value="true"),
+        DeclareLaunchArgument("obb_pca_sam_model_path", default_value="mobile_sam.pt"),
+        DeclareLaunchArgument("obb_pca_max_detections", default_value="5"),
+        DeclareLaunchArgument("obb_pca_show_result", default_value="true"),
+        DeclareLaunchArgument("obb_pca_result_window_width", default_value="960"),
+        DeclareLaunchArgument("obb_pca_result_window_height", default_value="720"),
+        DeclareLaunchArgument("obb_pca_result_window_x", default_value="720"),
+        DeclareLaunchArgument("obb_pca_result_window_y", default_value="40"),
+        DeclareLaunchArgument("obb_pca_result_wait_ms", default_value="30"),
         DeclareLaunchArgument("search_negative_joint_side", default_value="right"),
         DeclareLaunchArgument("search_side_deadband_deg", default_value="2.0"),
         DeclareLaunchArgument("search_joint_state_max_age_sec", default_value="0.5"),
+        DeclareLaunchArgument("searching_cmd_topic", default_value="/searching_mode/cmd"),
+        DeclareLaunchArgument("searching_status_topic", default_value="/searching_mode/status"),
+        DeclareLaunchArgument(
+            "searching_detection_result_topic",
+            default_value="/searching_mode/detection",
+        ),
+        DeclareLaunchArgument(
+            "searching_annotated_image_topic",
+            default_value="/searching_mode/annotated_image",
+        ),
+        DeclareLaunchArgument("searching_show_preview", default_value="false"),
+        DeclareLaunchArgument(
+            "lidar_side_clearance_topic",
+            default_value="/agv/line_detections",
+        ),
+        DeclareLaunchArgument("target_side_mode", default_value="left"),
+        DeclareLaunchArgument(
+            "target_side_mode_topic",
+            default_value="/searching_mode/target_side",
+        ),
+        DeclareLaunchArgument(
+            "active_target_side_topic",
+            default_value="/searching_mode/active_target_side",
+        ),
+        DeclareLaunchArgument("auto_harvest_enabled", default_value="true"),
+        DeclareLaunchArgument(
+            "auto_harvest_topic",
+            default_value="/searching_mode/auto_harvest",
+        ),
+        DeclareLaunchArgument("post_harvest_resume_delay_sec", default_value="5.0"),
 
         # ---------------------------------------------------------------------
         # Mode 1 topics
@@ -310,6 +463,7 @@ def generate_launch_description():
         DeclareLaunchArgument("traj_waypoint_topic", default_value="/trajectory/waypoint"),
         DeclareLaunchArgument("traj_path_topic", default_value="/trajectory/path"),
         DeclareLaunchArgument("tcp_target_dist_topic", default_value="/trajectory/tcp_target_dist"),
+        DeclareLaunchArgument("traj_final_approach_topic", default_value="/trajectory/final_approach"),
 
         DeclareLaunchArgument("ctrl_cmd_topic", default_value="/control/cmd"),
         DeclareLaunchArgument("ctrl_status_topic", default_value="/control/status"),
@@ -317,6 +471,10 @@ def generate_launch_description():
 
         #DeclareLaunchArgument("projection_distance_m", default_value="0.15"),
         DeclareLaunchArgument("projection_distance_m", default_value="0.25"),
+        DeclareLaunchArgument("final_approach_direct_target", default_value="true"),
+        DeclareLaunchArgument("final_approach_goal_tol_m", default_value="0.005"),
+        DeclareLaunchArgument("master_stop_distance_m", default_value="0.005"),
+        DeclareLaunchArgument("master_stop_margin_m", default_value="0.02"),
 
         # ---------------------------------------------------------------------
         # Control
@@ -329,9 +487,9 @@ def generate_launch_description():
 
         DeclareLaunchArgument("dt", default_value="0.02"),
         DeclareLaunchArgument("command_horizon_sec", default_value="0.05"),
-        DeclareLaunchArgument("kp_pos", default_value="10.0"),
-        DeclareLaunchArgument("kp_ori", default_value="0.5"),
-        DeclareLaunchArgument("damp_pos", default_value="0.1"),
+        DeclareLaunchArgument("kp_pos", default_value="8.0"),
+        DeclareLaunchArgument("kp_ori", default_value="1.0"),
+        DeclareLaunchArgument("damp_pos", default_value="0.5"),
         DeclareLaunchArgument("damp_ori", default_value="0.05"),
         DeclareLaunchArgument("max_joint_step_rad", default_value="0.02"),
         DeclareLaunchArgument("pos_tol_m", default_value="0.04"),
@@ -368,7 +526,7 @@ def generate_launch_description():
         # ---------------------------------------------------------------------
         # ESP32 gripper
         # ---------------------------------------------------------------------
-        DeclareLaunchArgument("gripper_esp32_ip", default_value="192.168.137.43"),
+        DeclareLaunchArgument("gripper_esp32_ip", default_value="10.42.0.59"),
         DeclareLaunchArgument("gripper_esp32_port", default_value="5000"),
         DeclareLaunchArgument("gripper_grasp_cmd", default_value="a"),
         DeclareLaunchArgument("gripper_release_cmd", default_value="b"),

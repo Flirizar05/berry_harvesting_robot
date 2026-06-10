@@ -2,6 +2,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -13,6 +14,10 @@ def generate_launch_description():
     mount_roll_arg = DeclareLaunchArgument("cam_roll", default_value="0.0")
     mount_pitch_arg = DeclareLaunchArgument("cam_pitch", default_value="-1.57079632679")
     mount_yaw_arg = DeclareLaunchArgument("cam_yaw", default_value="6.0")
+
+    x_offset_arg = DeclareLaunchArgument("eye_x_offset_m", default_value="-0.055")
+    y_offset_arg = DeclareLaunchArgument("eye_y_offset_m", default_value="0.01")
+    z_offset_arg = DeclareLaunchArgument("eye_z_offset_m", default_value="0.035")
 
     # Fixed transform from the robot flange reference to the tool frame.
     static_end_to_tool0 = Node(
@@ -69,6 +74,18 @@ def generate_launch_description():
             "tf_timeout_sec": 0.8,
             "compute_timeout_sec": 3.0,
             "require_fresh_point": False,
+            "x_offset_m": ParameterValue(
+                LaunchConfiguration("eye_x_offset_m"),
+                value_type=float,
+            ),
+            "y_offset_m": ParameterValue(
+                LaunchConfiguration("eye_y_offset_m"),
+                value_type=float,
+            ),
+            "z_offset_m": ParameterValue(
+                LaunchConfiguration("eye_z_offset_m"),
+                value_type=float,
+            ),
         }],
     )
 
@@ -79,6 +96,9 @@ def generate_launch_description():
         mount_roll_arg,
         mount_pitch_arg,
         mount_yaw_arg,
+        x_offset_arg,
+        y_offset_arg,
+        z_offset_arg,
         static_end_to_tool0,
         static_tool0_to_camera,
         static_camera_to_optical,

@@ -24,6 +24,12 @@ except Exception:
     TF_AVAILABLE = False
 
 
+TARGET_SIDE_ANY = "any"
+TARGET_SIDE_LEFT = "left"
+TARGET_SIDE_RIGHT = "right"
+TARGET_SIDE_NONE = "none"
+
+
 def rotation_from_axis_angle(axis: np.ndarray, angle: float) -> np.ndarray:
     """Build a homogeneous rotation matrix from an axis-angle representation."""
     normalized_axis = axis / max(np.linalg.norm(axis), 1e-12)
@@ -301,7 +307,12 @@ class ControlNode(Node):
         self.default_log_period_sec = 0.5
 
         self.local_alignment_axis = np.array([0.0, 0.0, 1.0], dtype=float)
-        self.desired_alignment_axis = np.array([0.0, 1.0, 0.0], dtype=float)
+        self.default_orientation_side = TARGET_SIDE_LEFT
+        self.default_target_side_mode = TARGET_SIDE_ANY
+        self.default_target_side_mode_topic = "/searching_mode/target_side"
+        self.default_active_target_side_topic = "/searching_mode/active_target_side"
+        self.default_left_desired_alignment_axis = [0.0, 1.0, 0.0]
+        self.default_right_desired_alignment_axis = [0.0, -1.0, 0.0]
 
     def _declare_parameters(self) -> None:
         self.declare_parameter("urdf_path", self.default_urdf_path)
@@ -327,6 +338,24 @@ class ControlNode(Node):
         self.declare_parameter("waypoint_topic", self.default_waypoint_topic)
         self.declare_parameter("cmd_topic", self.default_command_topic)
         self.declare_parameter("status_topic", self.default_status_topic)
+        self.declare_parameter("orientation_side", self.default_orientation_side)
+        self.declare_parameter("target_side_mode", self.default_target_side_mode)
+        self.declare_parameter(
+            "target_side_mode_topic",
+            self.default_target_side_mode_topic,
+        )
+        self.declare_parameter(
+            "active_target_side_topic",
+            self.default_active_target_side_topic,
+        )
+        self.declare_parameter(
+            "left_desired_alignment_axis",
+            self.default_left_desired_alignment_axis,
+        )
+        self.declare_parameter(
+            "right_desired_alignment_axis",
+            self.default_right_desired_alignment_axis,
+        )
 
         self.declare_parameter("execute_timeout_sec", self.default_execute_timeout_sec)
         self.declare_parameter("waypoint_timeout_sec", self.default_waypoint_timeout_sec)
@@ -375,6 +404,37 @@ class ControlNode(Node):
         self.waypoint_topic = str(self.get_parameter("waypoint_topic").value)
         self.command_topic = str(self.get_parameter("cmd_topic").value)
         self.status_topic = str(self.get_parameter("status_topic").value)
+        self.orientation_side = self._normalize_side(
+            self.get_parameter("orientation_side").value,
+            default_value=self.default_orientation_side,
+            allow_any=False,
+            allow_none=False,
+        )
+        self.target_side_mode = self._normalize_side(
+            self.get_parameter("target_side_mode").value,
+            default_value=self.default_target_side_mode,
+            allow_any=True,
+            allow_none=False,
+        )
+        self.active_target_side = TARGET_SIDE_NONE
+        self.target_side_mode_topic = str(
+            self.get_parameter("target_side_mode_topic").value
+        ).strip()
+        if not self.target_side_mode_topic:
+            self.target_side_mode_topic = self.default_target_side_mode_topic
+        self.active_target_side_topic = str(
+            self.get_parameter("active_target_side_topic").value
+        ).strip()
+        if not self.active_target_side_topic:
+            self.active_target_side_topic = self.default_active_target_side_topic
+        self.left_desired_alignment_axis = self._normalized_vector_parameter(
+            "left_desired_alignment_axis",
+            self.default_left_desired_alignment_axis,
+        )
+        self.right_desired_alignment_axis = self._normalized_vector_parameter(
+            "right_desired_alignment_axis",
+            self.default_right_desired_alignment_axis,
+        )
 
         self.execute_timeout_sec = float(self.get_parameter("execute_timeout_sec").value)
         self.waypoint_timeout_sec = float(self.get_parameter("waypoint_timeout_sec").value)
@@ -390,6 +450,26 @@ class ControlNode(Node):
         self.log_period_sec = float(self.get_parameter("log_period_sec").value)
         self.saturation_eps = float(self.get_parameter("sat_eps").value)
         self.saturation_hold_cycles = int(self.get_parameter("sat_hold_cycles").value)
+
+    def _normalized_vector_parameter(
+        self,
+        name: str,
+        default_value: list[float],
+    ) -> np.ndarray:
+        try:
+            vector = np.array(self.get_parameter(name).value, dtype=float).reshape(3)
+        except (TypeError, ValueError):
+            vector = np.array(default_value, dtype=float)
+
+        norm = float(np.linalg.norm(vector))
+        if norm <= 1e-9:
+            self.get_logger().warn(
+                f"Parameter '{name}' must be a non-zero 3D vector; using default."
+            )
+            vector = np.array(default_value, dtype=float)
+            norm = float(np.linalg.norm(vector))
+
+        return vector / max(norm, 1e-9)
 
     def _initialize_tf(self) -> None:
         if requested := bool(self.get_parameter("use_tf").value):
@@ -441,6 +521,18 @@ class ControlNode(Node):
         self.create_subscription(JointState, self.joint_state_topic, self._on_joint_state, 50)
         self.create_subscription(PoseStamped, self.waypoint_topic, self._on_waypoint, 50)
         self.create_subscription(String, self.command_topic, self._on_command, 10)
+        self.create_subscription(
+            String,
+            self.target_side_mode_topic,
+            self._on_target_side_mode,
+            10,
+        )
+        self.create_subscription(
+            String,
+            self.active_target_side_topic,
+            self._on_active_target_side,
+            10,
+        )
 
         self.trajectory_publisher = self.create_publisher(
             JointTrajectory,
@@ -453,6 +545,38 @@ class ControlNode(Node):
             10,
         )
         self.status_publisher = self.create_publisher(String, self.status_topic, 10)
+
+    def _on_target_side_mode(self, msg: String) -> None:
+        target_side_mode = self._normalize_side(
+            msg.data,
+            default_value=self.target_side_mode,
+            allow_any=True,
+            allow_none=False,
+        )
+        if target_side_mode == self.target_side_mode:
+            return
+
+        self.target_side_mode = target_side_mode
+        self.get_logger().info(
+            "Control target side mode changed to "
+            f"{self.target_side_mode}; orientation side={self._effective_orientation_side()}"
+        )
+
+    def _on_active_target_side(self, msg: String) -> None:
+        active_target_side = self._normalize_side(
+            msg.data,
+            default_value=TARGET_SIDE_NONE,
+            allow_any=False,
+            allow_none=True,
+        )
+        if active_target_side == self.active_target_side:
+            return
+
+        self.active_target_side = active_target_side
+        self.get_logger().info(
+            "Control active target side changed to "
+            f"{self.active_target_side}; orientation side={self._effective_orientation_side()}"
+        )
 
     def _on_joint_state(self, msg: JointState) -> None:
         joint_map = {name: position for name, position in zip(msg.name, msg.position)}
@@ -648,7 +772,10 @@ class ControlNode(Node):
             return
 
         current_alignment_axis = tcp_rotation @ self.local_alignment_axis
-        desired_alignment_axis = self.desired_alignment_axis
+        orientation_side = self._effective_orientation_side()
+        desired_alignment_axis = self._desired_alignment_axis_for_side(
+            orientation_side
+        )
         orientation_error = np.cross(current_alignment_axis, desired_alignment_axis)
         alignment_dot = float(np.dot(current_alignment_axis, desired_alignment_axis))
 
@@ -767,12 +894,47 @@ class ControlNode(Node):
                 f"TCP=({tcp_position[0]:+.3f},{tcp_position[1]:+.3f},{tcp_position[2]:+.3f}) "
                 f"WP=({self.current_waypoint[0]:+.3f},{self.current_waypoint[1]:+.3f},{self.current_waypoint[2]:+.3f}) "
                 f"|e_p|={position_error_norm:.4f} align={alignment_dot:+.3f} "
+                f"ori_side={orientation_side} "
                 f"|dq_step|={float(np.linalg.norm(joint_step)):.3e} "
                 f"maxΔq={max_step_value:.3e}({max_step_joint_name}) "
                 f"SAT=[{saturated_joint_names}] "
                 f"dq_null={nullspace_velocity_norm:.3e} "
                 f"wp_age={waypoint_age_sec:.2f}s settle={self.settle_count}"
             )
+
+    @staticmethod
+    def _normalize_side(
+        value,
+        default_value: str,
+        allow_any: bool,
+        allow_none: bool,
+    ) -> str:
+        side = str(value).strip().lower()
+        valid_sides = {TARGET_SIDE_LEFT, TARGET_SIDE_RIGHT}
+        if allow_any:
+            valid_sides.add(TARGET_SIDE_ANY)
+        if allow_none:
+            valid_sides.add(TARGET_SIDE_NONE)
+
+        if side in valid_sides:
+            return side
+
+        return default_value
+
+    def _effective_orientation_side(self) -> str:
+        if self.target_side_mode in (TARGET_SIDE_LEFT, TARGET_SIDE_RIGHT):
+            return self.target_side_mode
+
+        if self.active_target_side in (TARGET_SIDE_LEFT, TARGET_SIDE_RIGHT):
+            return self.active_target_side
+
+        return self.orientation_side
+
+    def _desired_alignment_axis_for_side(self, side: str) -> np.ndarray:
+        if side == TARGET_SIDE_RIGHT:
+            return self.right_desired_alignment_axis
+
+        return self.left_desired_alignment_axis
 
 
 def main(args=None) -> None:

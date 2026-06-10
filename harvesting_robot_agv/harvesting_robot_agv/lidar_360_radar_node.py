@@ -98,6 +98,8 @@ class Lidar360RadarNode(Node):
 
         self.latest_scan: LaserScan | None = None
         self.nearest_straight_line: StraightLineDetection | None = None
+        self.nearest_left_straight_line: StraightLineDetection | None = None
+        self.nearest_right_straight_line: StraightLineDetection | None = None
         self.side_clearance_detection: SideClearanceDetection | None = None
         self.side_clearance_sticky_suppressed = False
         self.side_clearance_motion_track: tuple[str, tuple[float, float], float] | None = None
@@ -370,9 +372,11 @@ class Lidar360RadarNode(Node):
 
     def _on_scan_received(self, msg: LaserScan) -> None:
         self.latest_scan = msg
-        self.nearest_straight_line = self._get_nearest_straight_line_detection(
-            msg
-        )
+        (
+            self.nearest_straight_line,
+            self.nearest_left_straight_line,
+            self.nearest_right_straight_line,
+        ) = self._get_nearest_straight_line_detections(msg)
         self.side_clearance_detection = self._get_side_clearance_detection(msg)
         self._publish_line_detections(self.nearest_straight_line)
 
@@ -388,10 +392,12 @@ class Lidar360RadarNode(Node):
             left_count,
             right_nearest_m,
             right_count,
-        ) = self._get_selected_line_horizontal_intersection(nearest_straight_line)
+        ) = self._get_side_line_horizontal_intersections()
         line_distance_m = self._line_distance(nearest_straight_line)
         line_angle_deg = self._line_angle(nearest_straight_line)
         line_side = self._line_side(nearest_straight_line)
+        left_line = self.nearest_left_straight_line
+        right_line = self.nearest_right_straight_line
         side_clearance = self.side_clearance_detection
 
         msg = String()
@@ -405,6 +411,14 @@ class Lidar360RadarNode(Node):
             "bush_line_angle_deg="
             f"{self._format_optional_angle(line_angle_deg)},"
             f"bush_line_side={line_side},"
+            "left_bush_line_distance_m="
+            f"{self._format_optional_distance(self._line_distance(left_line))},"
+            "left_bush_line_angle_deg="
+            f"{self._format_optional_angle(self._line_angle(left_line))},"
+            "right_bush_line_distance_m="
+            f"{self._format_optional_distance(self._line_distance(right_line))},"
+            "right_bush_line_angle_deg="
+            f"{self._format_optional_angle(self._line_angle(right_line))},"
             f"side_clearance_count={self._side_clearance_count(side_clearance)},"
             "side_clearance_nearest_m="
             f"{self._format_optional_distance(self._side_clearance_distance(side_clearance))},"
@@ -437,6 +451,45 @@ class Lidar360RadarNode(Node):
             return None, 0, x_right_m, 1
 
         return None, 0, None, 0
+
+    def _get_side_line_horizontal_intersections(
+        self,
+    ) -> tuple[float | None, int, float | None, int]:
+        left_nearest_m = self._horizontal_intersection_for_side(
+            self.nearest_left_straight_line,
+            "left",
+        )
+        right_nearest_m = self._horizontal_intersection_for_side(
+            self.nearest_right_straight_line,
+            "right",
+        )
+
+        return (
+            left_nearest_m,
+            1 if left_nearest_m is not None else 0,
+            right_nearest_m,
+            1 if right_nearest_m is not None else 0,
+        )
+
+    @staticmethod
+    def _horizontal_intersection_for_side(
+        line: StraightLineDetection | None,
+        side: str,
+    ) -> float | None:
+        if line is None:
+            return None
+
+        x_right_m = Lidar360RadarNode._horizontal_intersection_x_right_m(line)
+        if x_right_m is None:
+            return None
+
+        if side == "left" and x_right_m < 0.0:
+            return abs(x_right_m)
+
+        if side == "right" and x_right_m > 0.0:
+            return x_right_m
+
+        return None
 
     @staticmethod
     def _horizontal_intersection_x_right_m(
@@ -471,17 +524,55 @@ class Lidar360RadarNode(Node):
         self,
         scan: LaserScan,
     ) -> StraightLineDetection | None:
+        nearest_line, _, _ = self._get_nearest_straight_line_detections(scan)
+        return nearest_line
+
+    def _get_nearest_straight_line_detections(
+        self,
+        scan: LaserScan,
+    ) -> tuple[
+        StraightLineDetection | None,
+        StraightLineDetection | None,
+        StraightLineDetection | None,
+    ]:
         best_line = None
         best_score = None
+        best_left_line = None
+        best_left_score = None
+        best_right_line = None
+        best_right_score = None
+
+        def consider_line(line: StraightLineDetection) -> None:
+            nonlocal best_line
+            nonlocal best_score
+            nonlocal best_left_line
+            nonlocal best_left_score
+            nonlocal best_right_line
+            nonlocal best_right_score
+
+            best_line, best_score = self._select_nearest_line(
+                line,
+                best_line,
+                best_score,
+            )
+            side = self._line_side(line)
+            if side == "left":
+                best_left_line, best_left_score = self._select_nearest_line(
+                    line,
+                    best_left_line,
+                    best_left_score,
+                )
+            elif side == "right":
+                best_right_line, best_right_score = self._select_nearest_line(
+                    line,
+                    best_right_line,
+                    best_right_score,
+                )
 
         for cluster in self._get_scan_point_clusters(scan):
             line = self._fit_straight_line(cluster)
             if line is not None:
-                best_line, best_score = self._select_nearest_line(
-                    line,
-                    best_line,
-                    best_score,
-                )
+                consider_line(line)
 
             for window in self._iter_one_meter_windows(cluster):
                 line = self._fit_straight_line(window)
@@ -495,13 +586,9 @@ class Lidar360RadarNode(Node):
                 if expanded_line is not None:
                     line = expanded_line
 
-                best_line, best_score = self._select_nearest_line(
-                    line,
-                    best_line,
-                    best_score,
-                )
+                consider_line(line)
 
-        return best_line
+        return best_line, best_left_line, best_right_line
 
     @staticmethod
     def _select_nearest_line(
